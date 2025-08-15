@@ -1,0 +1,5 @@
+engine/
+__pycache__/
+output/
+*.txt
+*.json
