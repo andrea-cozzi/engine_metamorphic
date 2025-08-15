@@ -3,27 +3,11 @@ import capstone as cp
 from enum import Enum
 from typing import Optional, Tuple
 
-class BinaryType(Enum):
-    WINDOWS = 1
-    LINUX = 2
+from shared.constants import ARCHITECTURE_MAP, BinaryType
+
+
 
 class FileModel:
-    
-    ARCHITECTURE_MAP = {
-        BinaryType.WINDOWS: {
-            lief.PE.Header.MACHINE_TYPES.I386:   (cp.CS_ARCH_X86, cp.CS_MODE_32),
-            lief.PE.Header.MACHINE_TYPES.AMD64:  (cp.CS_ARCH_X86, cp.CS_MODE_64),
-            lief.PE.Header.MACHINE_TYPES.ARM:    (cp.CS_ARCH_ARM, cp.CS_MODE_ARM),
-            lief.PE.Header.MACHINE_TYPES.ARM64:  (cp.CS_ARCH_ARM64, cp.CS_MODE_ARM),
-        },
-        BinaryType.LINUX: {
-            lief.ELF.ARCH.I386:       (cp.CS_ARCH_X86, cp.CS_MODE_32),
-            lief.ELF.ARCH.X86_64:     (cp.CS_ARCH_X86, cp.CS_MODE_64),
-            lief.ELF.ARCH.ARM:        (cp.CS_ARCH_ARM, cp.CS_MODE_ARM),
-            lief.ELF.ARCH.AARCH64:    (cp.CS_ARCH_ARM64, cp.CS_MODE_ARM),
-        }
-    }
-
     def __init__(self, filepath: str):
         if not filepath:
             raise ValueError("Il percorso del file non può essere vuoto.")
@@ -65,10 +49,10 @@ class FileModel:
             raise
 
     def _map_architecture(self, machine_identifier: lief.lief_errors) -> None:
-        if self.type not in self.ARCHITECTURE_MAP:
+        if self.type not in ARCHITECTURE_MAP:
             raise NotImplementedError(f"Nessuna mappa di architetture per il tipo di binario {self.type.name}")
 
-        machine_type_map = self.ARCHITECTURE_MAP[self.type]
+        machine_type_map = ARCHITECTURE_MAP[self.type]
         capstone_config: Optional[Tuple[int, int]] = machine_type_map.get(machine_identifier)
 
         if capstone_config is None:

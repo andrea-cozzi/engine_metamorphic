@@ -3,3 +3,5 @@ __pycache__/
 output/
 *.txt
 *.json
+*.log
+TEMP_assebly_code_test.py

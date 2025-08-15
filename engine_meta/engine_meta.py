@@ -1,237 +1,304 @@
-import itertools
-import pprint
-from typing import Dict, List, Optional, Set, Tuple
-
-import lief
-from engine_meta.cfg import TERMINATOR_TYPE, BasicBlock, ControlFlowGraph, is_terminator
-from engine_meta.instruction.engine_meta_function import EngineMetaFunction
-from model import file_model
-import capstone as cap
+import hashlib
 import json
+import logging
+import random
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+import capstone as cap
+import lief
+from engine_meta.engine_cfg import EngineMetaCFG, BasicBlock
+from model import file_model
+from shared.common_def import is_terminator
+from shared.constants import TERMINATOR_TYPE
+
+logger = logging.getLogger(__name__)
 
 class MetamorphicEngine:
+    """Motore completo per analisi e trasformazioni metamorfica di binari."""
+
     def __init__(self, file: file_model.FileModel):
         if file is None:
-            return
+            raise ValueError("FileModel non può essere None")
         self.file = file
-        self.engine_function : EngineMetaFunction = EngineMetaFunction(arch=self.file.arch, mode=self.file.arch)
+        self.arch = file.arch
+        self.mode = file.mode
+        self.cfg: Optional[EngineMetaCFG] = None
 
-    def __get_base_address__(self):
+        logger.info(f"ARCHITECTURE: {self.arch}\t MODE:{self.mode} DI CAPSTONE")
+
+    # ----------------------------
+    # Disassemblaggio
+    # ----------------------------
+    def _get_base_address(self) -> int:
         binary = self.file.binary
-        if self.file.type == file_model.BinaryType.WINDOWS:
+        if isinstance(binary, lief.PE.Binary):
             return binary.optional_header.imagebase
+        elif isinstance(binary, lief.ELF.Binary):
+            load_segments = [s for s in binary.segments if s.type == lief.ELF.SEGMENT_TYPES.LOAD]
+            return min((s.virtual_address for s in load_segments), default=0)
+        raise ValueError("Formato binario non supportato.")
 
-        elif self.file.type == file_model.BinaryType.LINUX:
-            min_addr = float('inf')
-            found_load_segment = False
-            for segment in binary.segments:
-                if segment.type == lief.ELF.SEGMENT_TYPES.LOAD:
-                    found_load_segment = True
-                    min_addr = min(min_addr, segment.virtual_address)
-            return min_addr if found_load_segment else 0
-        else:
-            raise ValueError("File type not supported")
-
-
-    def create_graph_cfg(self, section : str = ".text", 
-                        save_ass_out: Optional[str] = None,
-                        save_cfg_out : Optional[str] = None
-                        ) -> Optional[ControlFlowGraph]:
-        
-        text_section =self.file.binary.get_section(section)
-        if not text_section:
-            return None
-
-        code_bytes = bytes(text_section.content)
-        section_address = self.__get_base_address__()+text_section.virtual_address
-        md = cap.Cs(self.file.arch, self.file.mode)
+    def _disassemble(self, code_bytes: bytes, start_addr: int) -> List[cap.CsInsn]:
+        md = cap.Cs(self.arch, self.mode)
         md.detail = True
+        md.skipdata = True
 
-        instructions = list(md.disasm(code_bytes, section_address))
-       
-        if save_ass_out is not None and len(save_ass_out)>0:
-            self.__save_assembly_to_file__(instructions=instructions, output_path=save_ass_out)
+        def skip_cb(insn: cap.CsInsn, size: int) -> int:
+            logger.warning(f"Ignorata istruzione dati a 0x{insn.address:x} di {size} byte")
+            return size
 
-        cfg : Optional[ControlFlowGraph] = self.__analyze__(
-            ins=instructions
-        )
+        md.skipdata_cb = skip_cb
+        instructions = list(md.disasm(code_bytes, start_addr))
+        logger.info(f"Disassemblate {len(instructions)} istruzioni dalla sezione")
+        return instructions
 
-        if cfg is None:
-            return None
-        
-        if save_cfg_out is not None and len(save_cfg_out) > 0:
-            self.__saveCFG__(
-                file_path=save_cfg_out,
-                chain= cfg
-            )
-
-        self.engine_function.set_cfg(cfg=cfg)
-
-        return cfg
-        
-
-
-
-    def __save_assembly_to_file__(self, instructions: list[cap.CsInsn] = [], output_path: str = ""):
-        with open(output_path, 'w') as out:
-            for ist in instructions:
-                line = f"0x{ist.address:x}:\tmem: {ist.mnemonic}\t{ist.op_str}\n"
-                out.write(line)
-    
-
-    def __analyze__(self, ins: List[cap.CsInsn]) -> Optional[ControlFlowGraph]:
-        if not ins:
+    # ----------------------------
+    # CFG
+    # ----------------------------
+    def create_graph_cfg(self, section: str = ".text") -> Optional[EngineMetaCFG]:
+        text_section = self.file.binary.get_section(section)
+        if not text_section:
+            logger.warning(f"Sezione '{section}' non trovata.")
             return None
 
-        cfg = ControlFlowGraph()
-        leaders: Set[int] = set()
-        addr_to_idx: Dict[int, int] = {instr.address: i for i, instr in enumerate(ins)}
+        section_address = self._get_base_address() + text_section.virtual_address
+        code_bytes = bytes(text_section.content)
+        instructions = self._disassemble(code_bytes, section_address)
+        self.cfg = self._analyze(instructions)
+        return self.cfg
 
-        # --- PASSATA 1: Identificazione dei Leader ---
-        leaders.add(ins[0].address)
+    def _analyze(self, instructions: List[cap.CsInsn]) -> Optional[EngineMetaCFG]:
+        if not instructions:
+            return None
 
-        for i, instr in enumerate(ins):
-            term_type, is_conditional = is_terminator(instr)
-            if term_type is None:
-                continue
-
-            # Target di un salto o call è un leader
-            if instr.operands and instr.operands[0].type == cap.x86.X86_OP_IMM:
-                target_addr = instr.operands[0].imm
-                if target_addr in addr_to_idx:
-                    leaders.add(target_addr)
-
-            # Istruzione successiva a un salto condizionale o call è un leader
-            if is_conditional or term_type == TERMINATOR_TYPE.CALL:
-                if i + 1 < len(ins):
-                    leaders.add(ins[i + 1].address)
-
-        # --- PASSATA 2: Creazione e Collegamento dei Blocchi ---
-        sorted_leaders = sorted(list(leaders))
-        leader_set = set(sorted_leaders) # Usiamo un set per ricerche veloci O(1)
+        cfg = EngineMetaCFG()
+        leaders, addr_to_idx = self._find_leaders(instructions)
+        sorted_leaders = sorted(leaders)
+        leader_set = set(sorted_leaders)
 
         for i, start_addr in enumerate(sorted_leaders):
-            block = BasicBlock(start_addr)
-            
-            # Popola il blocco
-            next_leader_addr = sorted_leaders[i + 1] if i + 1 < len(sorted_leaders) else float('inf')
-            current_idx = addr_to_idx[start_addr]
-            while current_idx < len(ins) and ins[current_idx].address < next_leader_addr:
+            block = BasicBlock(start_addr, self.arch, self.mode)
+            next_leader = sorted_leaders[i + 1] if i + 1 < len(sorted_leaders) else float("inf")
+            idx = addr_to_idx[start_addr]
 
-                block.add_instruction(ins[current_idx])
-                current_idx += 1
-            
-            cfg.add_block(block)
+            while idx < len(instructions) and instructions[idx].address < next_leader:
+                block.add_instruction(instructions[idx])
+                idx += 1
 
-            # --- LOGICA DI COLLEGAMENTO CORRETTA ---
-            if not block.instructions:
-                continue # Salta blocchi vuoti se mai dovessero crearsi
+            if block.instructions:
+                cfg.add_block(block)
 
-            last_instr = block.instructions[-1]
-            term_type, is_conditional = is_terminator(last_instr)
-
-            # 1. Aggiungi il successore del salto (se esiste)
-            if term_type == TERMINATOR_TYPE.JUMP or term_type == TERMINATOR_TYPE.CALL:
-                if last_instr.operands and last_instr.operands[0].type == cap.x86.X86_OP_IMM:
-                    target_addr = last_instr.operands[0].imm
-                    if target_addr in leader_set: # Controlla se il target è l'inizio di un blocco valido
-                        block.successors.append(target_addr)
-
-            # 2. Aggiungi il successore "fall-through" (se applicabile)
-            # Un fall-through esiste se il flusso non è interrotto incondizionatamente
-            is_unconditional_end = (term_type == TERMINATOR_TYPE.RETURN) or \
-                                (term_type == TERMINATOR_TYPE.IRET) or \
-                                (term_type == TERMINATOR_TYPE.JUMP and not is_conditional)
-
-            if not is_unconditional_end:
-                fall_through_addr = last_instr.address + last_instr.size
-                if fall_through_addr in leader_set:
-                    block.successors.append(fall_through_addr)
-                    
+        cfg.link_successors()
         return cfg
 
+    def _find_leaders(self, instructions: List[cap.CsInsn]) -> Tuple[List[int], Dict[int, int]]:
+        leaders = set()
+        addr_to_idx = {instr.address: idx for idx, instr in enumerate(instructions)}
+
+        if instructions:
+            leaders.add(instructions[0].address)
+
+        for idx, instr in enumerate(instructions):
+            try:
+                term_type, is_conditional = is_terminator(instr)
+            except Exception:
+                term_type, is_conditional = None, False
+
+            if term_type:
+                if idx + 1 < len(instructions):
+                    leaders.add(instructions[idx + 1].address)
+                if term_type in (TERMINATOR_TYPE.JUMP, TERMINATOR_TYPE.CALL):
+                    try:
+                        for op in getattr(instr, 'operands', []):
+                            if hasattr(op, 'imm'):
+                                imm_addr = op.imm
+                                if imm_addr in addr_to_idx:  # <-- aggiungi controllo
+                                    leaders.add(imm_addr)
+                    except Exception as e:
+                        logger.error(f"error: find_leaders: {e}")
+                        pass
+        return sorted(leaders), addr_to_idx
+
+    # ----------------------------
+    # Analisi dipendenze
+    # ----------------------------
+    @staticmethod
+    def _x86_ops(instr: cap.CsInsn):
+        if getattr(instr, "detail", None) is None:
+            return []
+        x86 = getattr(instr.detail, "x86", None)
+        return getattr(x86, "operands", []) if x86 else []
+
+    @staticmethod
+    def _regs_access(instr: cap.CsInsn) -> Tuple[List[int], List[int]]:
+        if hasattr(instr, "regs_access"):
+            try:
+                return instr.regs_access()
+            except Exception:
+                pass
+        rr = getattr(instr, "regs_read", []) or []
+        rw = getattr(instr, "regs_write", []) or []
+        return list(rr), list(rw)
+
+    @staticmethod
+    def _has_access_flag(op, flag: int) -> bool:
+        if hasattr(op, "access"):
+            try:
+                return (op.access & flag) != 0
+            except Exception:
+                return True
+        return True
+
+    @staticmethod
+    def _mem_addr_str(instr: cap.CsInsn, op: cap.x86.X86Op) -> str:
+        parts = []
+        if op.mem.base:
+            parts.append(instr.reg_name(op.mem.base))
+        if op.mem.index:
+            parts.append(f"{instr.reg_name(op.mem.index)}*{op.mem.scale}")
+        if op.mem.disp:
+            parts.append(f"{op.mem.disp:#x}")
+        return f"MEM[{'+'.join(parts) if parts else '0'}]"
+
+    def _get_read_set(self, instr: cap.CsInsn) -> Set[str]:
+        read: Set[str] = set()
+        regs_r, _ = self._regs_access(instr)
+        read.update(instr.reg_name(r) for r in regs_r)
+        for op in self._x86_ops(instr):
+            if op.type == cap.x86.X86_OP_MEM and self._has_access_flag(op, cap.CS_AC_READ):
+                read.add(self._mem_addr_str(instr, op))
+        return read
+
+    def _get_write_set(self, instr: cap.CsInsn) -> Set[str]:
+        write: Set[str] = set()
+        _, regs_w = self._regs_access(instr)
+        write.update(instr.reg_name(r) for r in regs_w)
+        for op in self._x86_ops(instr):
+            if op.type == cap.x86.X86_OP_MEM and self._has_access_flag(op, cap.CS_AC_WRITE):
+                write.add(self._mem_addr_str(instr, op))
+        return write
+
+    def are_instructions_independent(self, inst1: cap.CsInsn, inst2: cap.CsInsn) -> bool:
+        if not inst1 or not inst2:
+            return False
+        read1, write1 = self._get_read_set(inst1), self._get_write_set(inst1)
+        read2, write2 = self._get_read_set(inst2), self._get_write_set(inst2)
+        return write1.isdisjoint(read2) and read1.isdisjoint(write2) and write1.isdisjoint(write2)
+
+    def are_blocks_independent(self, block_a_addr: int, block_b_addr: int) -> Optional[bool]:
+        if self.cfg is None:
+            raise RuntimeError("CFG non impostato")
+        if block_a_addr == block_b_addr:
+            return True
+        block1 = self.cfg.blocks.get(block_a_addr)
+        block2 = self.cfg.blocks.get(block_b_addr)
+        if not block1 or not block2:
+            return False
+        if not block1.instructions or not block2.instructions:
+            return True
+        for inst1 in block1.instructions:
+            for inst2 in block2.instructions:
+                if not self.are_instructions_independent(inst1, inst2):
+                    return False
+        return True
+
+    # ----------------------------
+    # Permutazioni
+    # ----------------------------
+    def instruction_permutation(self, addr1: int, addr2: int, block: BasicBlock) -> None:
+        inst1 = block.instructions_map.get(addr1)
+        inst2 = block.instructions_map.get(addr2)
+        if not inst1 or not inst2:
+            raise RuntimeError("Indirizzi non presenti nel blocco")
+        if self.are_instructions_independent(inst1, inst2):
+            block.swap_instructions(inst1, inst2)
+            logger.info("Istruzioni scambiate 0x%x ↔ 0x%x", addr1, addr2)
+
+    def block_permutation(self, addr1: Optional[int] = None, addr2: Optional[int] = None, percent: int = -1) -> int:
+        if self.cfg is None:
+            raise RuntimeError("CFG non impostato")
+        if addr1 is not None and addr2 is not None:
+            self.cfg.swap_blocks(addr1, addr2)
+            return 1
+        if addr1 is None and addr2 is None:
+            percent = 50 if percent == -1 else percent
+            return self._swap_random_blocks_by_percent(percent)
+        raise SyntaxError("Fornire entrambi gli indirizzi o nessuno dei due.")
+
+    def _swap_random_blocks_by_percent(self, percent: int = 40) -> int:
+        block_addresses = list(self.cfg.blocks.keys())
+        total_blocks = len(block_addresses)
+        if total_blocks < 2:
+            return 0
+        target_swaps = max(0, int((total_blocks * (percent / 100.0)) / 2))
+        if target_swaps == 0:
+            return 0
+        random.shuffle(block_addresses)
+        swapped = 0
+        for addr1, addr2 in zip(block_addresses[::2], block_addresses[1::2]):
+            if swapped >= target_swaps:
+                break
+            try:
+                if self.are_blocks_independent(addr1, addr2):
+                    self.cfg.swap_blocks(addr1, addr2)
+                    swapped += 1
+            except Exception:
+                continue
+        return swapped
+
+    # ----------------------------
+    # Hash
+    # ----------------------------
+    @staticmethod
+    def calculate_hash(inst_list: List[cap.CsInsn]) -> str:
+        m = hashlib.md5()
+        for instr in inst_list:
+            m.update(instr.bytes)
+        return m.hexdigest()
     
-    def __saveCFG__(self, file_path: str= "", chain: ControlFlowGraph = None):
-        serializable_data = {
-            "count": len(chain.blocks.items()),
-            "blocks": {}
-        }
+    def test_and_compare_hashes(self, cfg: EngineMetaCFG, percent: int = 50) -> None:
+        """Esegue permutazioni sui blocchi e confronta l'hash MD5 complessivo prima/dopo."""
+        if cfg is None:
+            raise ValueError("CFG non può essere None")
 
-        for start_addr, block in chain.blocks.items():
-            serializable_block = {
-                "start_address": hex(block.start_address),
-                "end_address": hex(block.end_address),
-                "successors": [hex(s) for s in block.successors],
-                "instructions": []
-            }
+        # Funzione interna per calcolare hash complessivo del CFG
+        def overall_cfg_hash(cfg: EngineMetaCFG) -> str:
+            m = hashlib.md5()
+            # Ordinare i blocchi per indirizzo per consistenza
+            for addr in sorted(cfg.blocks.keys()):
+                block = cfg.blocks[addr]
+                for instr in block.instructions:
+                    m.update(instr.bytes)
+            return m.hexdigest()
 
-            REG_TYPE = 1
-            IMM_TYPE = 2
-            MEM_TYPE = 3
+        # Hash iniziale complessivo
+        original_hash = overall_cfg_hash(cfg)
+        logger.info(f"MD5 complessivo prima della permutazione: {original_hash}")
 
-            for instr in block.instructions:
-                
-                operand_list =[]
-                for op in instr.operands:
-                    operand_info = {
-                        "type": op.type, #tipo di operando
-                        "reg": instr.reg_name(op.reg) if op.type == REG_TYPE else None, # Se è un operazione di registro contene il nome del registro
-                        "imm": op.imm if op.type == IMM_TYPE else None, #Se IMM_TYPE, contiene il valore immediato --> valore costante scritto nel codice 
-                        # Se è un accesso in memoria --> scoposizione dell'indirizzo a cui si accede
-                        "mem": {
-                            "base": instr.reg_name(op.mem.base) if MEM_TYPE else None, #Registro baso usato per il calcolo
-                            "index": instr.reg_name(op.mem.index) if op.type == cap.x86.X86_OP_MEM else None, #registro di index utilizzato 
-                            "scale": op.mem.scale if op.type == cap.x86.X86_OP_MEM else None,#valore da moltiplicare index
-                            "disp": op.mem.disp if op.type == cap.x86.X86_OP_MEM else None,# offset indirizzo
-                        } if op.type == cap.x86.X86_OP_MEM else None
-                    },
-                
-                    operand_list.append(operand_info)
+        # Swap dei blocchi
+        swapped = self._swap_random_blocks_by_percent(percent)
+        logger.info(f"Swapped {swapped} blocks")
 
-                serializable_instr = {
-                    "address": hex(instr.address),
-                    "mnemonic": instr.mnemonic,
-                    "op_str": instr.op_str,
-                    "size": instr.size,
-                    "bytes": instr.bytes.hex(),
-                    "operand_info": operand_list
-                }
-                serializable_block["instructions"].append(serializable_instr)
-            
-            serializable_data["blocks"][hex(start_addr)] = serializable_block
+        # Hash finale complessivo
+        new_hash = overall_cfg_hash(cfg)
+        logger.info(f"MD5 complessivo dopo la permutazione: {new_hash}")
 
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(serializable_data, f, indent=4)
+        # Confronto
+        if original_hash != new_hash:
+            logger.info("CFG modificato dopo la permutazione")
+        else:
+            logger.info("CFG invariato dopo la permutazione")
+
+        
 
 
-    def analyze_assembly(self, ins: List[cap.CsInsn], file_path: Optional[str] = None) -> None:
-        should_return_chain = file_path is not None and len(file_path) > 0
-        chain = self.__analyze__(ins)
-
-        if should_return_chain and chain is not None:
-            self.__saveChain__(file_path, chain)
-
-
-
-
-
-    # ===================== FUNZIONI DI TEST DELLE SINGOLE FUNZIONI ========================       
-
-    def test_indipendent_istruction(self, CODE):
-        md = cap.Cs(self.file.arch, self.file.mode)
-        md.detail = True
-
-        instructions = list(md.disasm(CODE, 0x1000))
-        instruction_pairs = itertools.combinations(instructions, 2)
-
-
-        with open("output/test_istruzioni_indipendenti.txt", 'w') as file:
-            for inst1, inst2 in instruction_pairs:
-                are_independent = self.engine_function.instruction_indipendent(inst1, inst2)
-                result_text = "Indipendenti" if are_independent else "NOT Indipendenti"
-                line1 = f"{inst1.mnemonic} {inst1.op_str}"
-                line2 = f"{inst2.mnemonic} {inst2.op_str}"
-
-                file.write(f"{line1}\t {line2}\t{result_text}\n")
-    
+    # ----------------------------
+    # Salvataggio CFG
+    # ----------------------------
+    def save_cfg(self, path: str) -> None:
+        if self.cfg is None:
+            raise RuntimeError("CFG non impostato")
+        serializable_cfg = {addr: block.to_dict() for addr, block in self.cfg.blocks.items()}
+        with open(path, "w") as f:
+            json.dump(serializable_cfg, f, indent=2)
+        logger.info(f"CFG salvato in {path}")
