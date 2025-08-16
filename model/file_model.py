@@ -1,61 +1,37 @@
-import lief
-import capstone as cp
-from enum import Enum
-from typing import Optional, Tuple
-
-from shared.constants import ARCHITECTURE_MAP, BinaryType
+from typing import Optional, Union
+import lief as lf
+from shared.constants import BinaryType
 
 
+class FileModelBinary:
 
-class FileModel:
-    def __init__(self, filepath: str):
-        if not filepath:
-            raise ValueError("Il percorso del file non può essere vuoto.")
-
-        self.filepath: str = filepath
-        self.binary: Optional[lief.Binary] = None
-        self.type: Optional[BinaryType] = None
+    def __init__(self, binary: lf.Binary, file_path : str, binary_type: BinaryType):
+        self.file_path: str = file_path
+        self.binary: Optional[lf.Binary] = binary
+        self.type: Optional[BinaryType] = binary_type
         self.arch: Optional[int] = None
         self.mode: Optional[int] = None
-        self.ep: Optional[int] = None
+        self.ep: Optional[int] = self.binary.entrypoint
         self.is_64: Optional[bool] = None
 
-        try:
-            # Esegui il parsing del file una sola volta
-            binary = lief.parse(self.filepath)
-            if binary is None:
-                raise RuntimeError("File non riconosciuto da LIEF o non è un formato binario supportato.")
+    def get_base_address(self) -> int:
+        binary: Union[lf.PE.Binary, lf.ELF.Binary] = self.binary
+        if isinstance(binary, lf.PE.Binary):
+            return binary.optional_header.imagebase
+        elif isinstance(binary, lf.ELF.Binary):
+            load_segments = [s for s in binary.segments if s.type == lf.ELF.SEGMENT_TYPES.LOAD]
+            return min((s.virtual_address for s in load_segments), default=0)
+        raise ValueError("Binary file not supported")
+    
+    def get_machine_type(self):
+        if self.type == BinaryType.WINDOWS:
+            return self.binary.header.machine
+        elif self.type == BinaryType.LINUX:
+            return self.binary.header.machine
+        else:
+            raise ValueError(f"{self.filepath} is an unknown type")
             
-            self.binary = binary
-            self.ep = self.binary.entrypoint 
-            machine_identifier = None
 
-            if isinstance(self.binary, lief.PE.Binary):
-                self.type = BinaryType.WINDOWS
-                machine_identifier = self.binary.header.machine
-            elif isinstance(self.binary, lief.ELF.Binary):
-                self.type = BinaryType.LINUX
-                machine_identifier = self.binary.header.machine_type
-            else:
-                raise NotImplementedError(f"Il formato binario '{self.binary.format}' non è supportato.")
-            
-            self._map_architecture(machine_identifier)
-            
-        except RuntimeError as e:
-            print(f"Errore di configurazione: Impossibile fare il parsing del file. {e}")
-            raise
-        except Exception as e:
-            print(f"Errore di configurazione: {e}")
-            raise
 
-    def _map_architecture(self, machine_identifier: lief.lief_errors) -> None:
-        if self.type not in ARCHITECTURE_MAP:
-            raise NotImplementedError(f"Nessuna mappa di architetture per il tipo di binario {self.type.name}")
 
-        machine_type_map = ARCHITECTURE_MAP[self.type]
-        capstone_config: Optional[Tuple[int, int]] = machine_type_map.get(machine_identifier)
 
-        if capstone_config is None:
-            raise NotImplementedError(f"L'architettura '{machine_identifier.name}' non è supportata per {self.type.name}.")
-            
-        self.arch, self.mode = capstone_config

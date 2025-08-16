@@ -1,9 +1,15 @@
+from component.assembler import FasmAssembler
+from component.parser import Parser
 import logging
 import traceback
 import lief
 from model import file_model
 from engine_meta import engine_meta
 from datetime import datetime
+
+from check_exe import compare_executables
+
+
 
 def main() -> None:
 
@@ -19,21 +25,20 @@ def main() -> None:
     print(f"[*] Script started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("-" * 40)
 
+
+    logger = logging.getLogger(__name__)
     try:
+
         target_file_path = "C:\\Users\\andrea.cozzi\\Desktop\\main_small.exe"
+        tagert_file_output = "C:\\Users\\andrea.cozzi\\Desktop\\main_small_modificato.exe"
         print(f"[*] Analisi del file: {target_file_path}")
         
-        model = file_model.FileModel(target_file_path)
-        engine = engine_meta.MetamorphicEngine(model)
-        print("[*] Costruzione del Control Flow Graph dalla sezione .text...")
-        cfg = engine.create_graph_cfg(section=".text")
-
-        if cfg:
-            #engine.save_cfg_to_json(cfg, "output/cfg_iniziale.json")
-            # Esegui il test principale che applica la trasformazione e confronta gli hash
-            engine.test_and_compare_hashes(cfg, percent=50)
-        else:
-            print("ERRORE: Impossibile creare il Control Flow Graph. L'analisi non può procedere.")
+        parser: Parser = Parser()
+        file : file_model.FileModelBinary = parser.parse(target_file_path)
+        if file is None:
+            raise RuntimeError()
+        engine = engine_meta.MetamorphicEngine(model=file)
+        engine.create_graph_cfg(save_on_json=False)
 
     except (ValueError, FileNotFoundError) as e: 
         print(f"\nERRORE CRITICO: {e}")
