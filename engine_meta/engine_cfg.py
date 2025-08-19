@@ -1,237 +1,308 @@
 from bisect import bisect, bisect_right
-import hashlib
 import json
 import logging
+import pprint
+import traceback
 from typing import List, Dict, Optional, Set, Tuple
 import capstone as cap
 import keystone as ks
 import lief as lf
 
-from component.disassembler import Disassembler
+
+from component.ass_diss import create_disassembler, disassemble_bytes
+from engine_meta.model.basic_block import BasicBlock
+from engine_meta.model.basic_instruction import BasicInstruction
+from engine_meta.model.ordered_uuidset import OrderedUUIDSet
 from model.file_model import FileModelBinary
 from shared.common_def import is_terminator
 from shared.constants import CAPSTONE_TO_KEYSTONE_MAP, INVERT_MAP, TERMINATOR_TYPE
 
 logger = logging.getLogger(__name__)
 
+LABEL_BLOCK = "label_{:#x}"
 
-class BasicBlock:
-    """Rappresenta un blocco di base con istruzioni, terminatore e collegamenti nel CFG."""
-
-    def __init__(self, start_address: int):
-
-        self.start_address: int = start_address
-        self.end_address: int = start_address  # indirizzo subito dopo l'ultima istruzione
-        self.instructions: List[cap.CsInsn] = []  # istruzioni del blocco
-        self.successors: List[int] = []  # indirizzi dei blocchi successori
-        self.terminator: Optional[cap.CsInsn] = None
-        self.terminator_type: Optional[str] = None
-        self.instructions_map: Dict[int, cap.CsInsn] = {}
-
-    @property
-    def id(self) -> str:
-        """Restituisce un hash univoco del blocco basato sulle istruzioni."""
-        hasher = hashlib.sha256()
-        for instr in self.instructions:
-            hasher.update(instr.bytes)
-        return hasher.hexdigest()
-
-
-    # === API ==== 
-    def add_instruction(self, instruction: cap.CsInsn) -> None:
-        """Aggiunge un'istruzione al blocco, aggiornando end_address fisico."""
-        if not instruction:
-            return
-        self.instructions.append(instruction)
-        self.instructions_map[instruction.address] = instruction
-        # end_address rappresenta l'indirizzo subito dopo l'ultima istruzione nel blocco
-        self.end_address = instruction.address + instruction.size
-
-
-    def set_terminator(self, instruction: cap.CsInsn, term_type: str) -> None:
-        """Imposta il terminatore del blocco e aggiorna end_address se necessario."""
-        self.terminator = instruction
-        self.terminator_type = term_type
-        # L'end_address deve essere almeno fino al terminatore fisico
-        self.end_address = max(self.end_address, instruction.address + instruction.size)
-        self.add_instruction(instruction)  # aggiunge anche il terminatore nella map e aggiorna end_address
-
-
-
-    def get_instruction_at(self, address: int) -> Optional["cap.CsInsn"]:
-        """Ritorna l'istruzione che inizia a un dato indirizzo."""
-        return self.instructions_map.get(address)
-    
-
-
-    def _reasing_addresses(self) -> None:
-        current_address = self.start_address
-        for i, instr in enumerate(self.instructions):
-            instr.address = current_address
-            current_address += instr.size
-
-
-    def swipe_instruction(self, address_one: int, address_two: int) -> None:
-        if not (0 <= address_one< len(self.instructions) and 0 <= address_two < len(self.instructions)):
-            raise IndexError("Indici delle istruzioni fuori range")
-        
-        if address_one == self.terminator.address or address_two == self.terminator.address:
-            raise ValueError("Cannot swipe the block terminator instruction")
-        
-
-    
-        
-    # ==== FUNZIONI DI UTIL ==================
-    def to_dict(self) -> dict:
-        return {
-            "start_address": hex(self.start_address),
-            "count": len(self.instructions),
-            "instructions": [
-                {
-                    "address": hex(instr.address),
-                    "mnemonic": instr.mnemonic,
-                    "op_str": instr.op_str,
-                    "bytes": getattr(instr, 'bytes', b'').hex() if hasattr(instr, 'bytes') else ""
-                }
-                for instr in self.instructions
-            ],
-            "successors": list(self.successors) if hasattr(self, "successors") else []
-        }
-    
-    def get_instruction(self) -> List[cap.CsInsn]:
-      return list(self.instructions)
-
+NON_PERMUTABLE_GROUP = {
+        cap.CS_GRP_JUMP,
+        cap.CS_GRP_CALL,
+        cap.CS_GRP_RET,
+        cap.CS_GRP_IRET,
+        cap.CS_GRP_INT,
+}
 
 # -----------------------------------------------------------------------------
 # EngineMeta CFG
 # -----------------------------------------------------------------------------
+"""
+COSTRUIRE UN MECCANISMO CHE SE è UN JUMP/CALL DEVE
+ESSERE INSERITA IN QUELLE CHE NON POSSONO ESSERE EQUIVALENTI
+"""
+
+
+
 class EngineMetaCFG:
 
     def __init__(self):
+        #int --> indirizzo di star del blocco
         self.blocks: Dict[int, BasicBlock] = {}
-        self.predecessors: Dict[int, List[int]] = {}
-        self.sorted_starts: List[int] = []
+
+        #indirizzo base della sezione
+        self._start_addres_base : Optional[int] = None
+
+
+        #Tutte le istruzioni / blocks del grafo
+        self._all_instructions_unordered: Set[BasicInstruction] = set()
+        self._all_blocks_ordered : OrderedUUIDSet[BasicBlock] = OrderedUUIDSet[BasicBlock]()
+
+
+        #Mappa delle label dei blocchi
+        self._map_address_label: Dict[int, str] = {}
+
         #Utilie per la ricerca
-        self.block_start_address_set: Set[int] = set()
+        self._map_address_instruction: Dict[int, BasicInstruction] = {}
+        self._map_address_uuid: Dict[int, str] = {}
+        
+        #Set di UUID per le istruzioni che non TROVAre EQUIVALENTI
+        self.no_equ_set : Set[str] = set()
+        self.no_perm_set: Set[str] = set()
+
         self.created : bool = False
 
 
     #----- FUNZIONI PRIVATE ---------------------
     def _find_terminators(self, instructions: List[cap.CsInsn]) -> Dict[int, TERMINATOR_TYPE]:
-        """Ritorna un dict degli indirizzi dei terminatori e il loro tipo."""
         terminators = {}
-        for instr in instructions:
-            term_type, _ = is_terminator(instr)
-            if term_type:
+        for _, instr in enumerate(instructions):
+            term_type, _= is_terminator(instr)
+            if term_type is not None:
                 terminators[instr.address] = term_type
         return terminators
 
-    
 
-    def _link_successors(self):
-         for block in self.blocks.values():
-            if not block.instructions:
-                block.successors = []
+    #COSTRUISCO TUTTE LE MAPPE NECESSARIE PER VELOCIZZARE LA RICERCA
+    def _create_maps(self) -> None:
+        for block in self.blocks.values():   # usa .values() se self.blocks è un dict
+            for ins in block.instructions:   # block.instructions è un OrderedUUIDSet, puoi iterarlo
+                self._map_address_instruction[ins.address] = ins
+                self._map_address_uuid[ins.address] = ins.uuid
+                self._all_instructions_unordered.add(ins)
+
+            self._all_blocks_ordered.add(block)
+
+
+
+    #COSTRUISCO IL GRUPPO DI ISTRUZIONI CHE NON POSSONO ESSERE PERMUTATE
+    def _create_unpermutable_set(self) -> None:
+        for _, instruction in enumerate(self._all_instructions_unordered):
+            cap_ins : cap.CsInsn = instruction.original_object
+            if cap_ins is None or not hasattr(cap_ins, "groups"):
+                logger.warning(f"Instructiona at {instruction.address} is None or doesnt have groups attr")
+                raise ValueError(f"Instructiona at {instruction.address} is None or doesnt have groups attr")
+
+            groups = getattr(cap_ins, "groups", [])
+            if any(group in groups for group in NON_PERMUTABLE_GROUP):
+                self.no_perm_set.add(instruction.uuid)
+                instruction.is_permutable = False
+
+
+    #COSTRUISCO IL GRUPPO DI ISTRUZIONI CHE NON POSSO ASSCOARLE UNA EQUIVALENTE
+    def _create_unequivalent_set(self) -> None: 
+        for _, instruction in enumerate(self._all_instructions_unordered):
+            cap_ins: cap.CsInsn = instruction.original_object
+
+            if cap_ins is None or not hasattr(cap_ins, "groups"):
+                logger.warning(f"Instruction at {instruction.address} is None or doesn't have groups attr")
                 continue
 
-            last_instr = block.instructions[-1]
-            successors: Set[int] = set()
+            groups = getattr(cap_ins, "groups", [])
 
-            try:
-                term_type, is_conditional = is_terminator(last_instr)
-            except Exception:
-                groups = set(last_instr.groups)
-                is_jump = cap.CS_GRP_JUMP in groups
-                is_call = cap.CS_GRP_CALL in groups
-                is_ret = cap.CS_GRP_RET in groups
-                term_type = (TERMINATOR_TYPE.JUMP if is_jump else
-                             TERMINATOR_TYPE.CALL if is_call else
-                             TERMINATOR_TYPE.RETURN if is_ret else None)
-                is_conditional = is_jump and last_instr.mnemonic.lower() != "jmp"
+            if any(group in groups for group in NON_PERMUTABLE_GROUP) or instruction.uuid  in self.no_perm_set:
+                self.no_equ_set.add(instruction.uuid)
+                instruction.is_equivalent = False
 
-            # target immediato se è leader
-            if term_type:
-                successors.update(
-                    int(op.imm) for op in getattr(last_instr, "operands", [])
-                    if getattr(op, "type", None) == cap.x86_const.X86_OP_IMM
-                    and int(op.imm) in self.block_start_address_set
-                )
 
-                # fallthrough per salti condizionali
-                if is_conditional:
-                    next_addr = last_instr.address + last_instr.size
-                    if next_addr in self.block_start_address_set:
-                        successors.add(next_addr)
-            else:
-                # istruzione normale -> fallthrough
-                next_addr = last_instr.address + last_instr.size
-                if next_addr in self.block_start_address_set:
-                    successors.add(next_addr)
+    #COSTRUISCO IL SINGOLO BLOCCO 
+    def _add_block(self, block: BasicBlock) -> Optional[str]:
+        if block.start_address not in self.blocks:
+            self.blocks[block.start_address] = block
+            self._map_address_label[block.start_address] = LABEL_BLOCK.format(block.start_address)
+            return block.uuid
+        else:
+            logger.warning(f"Block at {hex(block.start_address)} already exists. Skipping.")
 
-            block.successors = list(sorted(successors))  # opzionale: ordina se serve
-            # aggiorna predecessori
-            for succ in block.successors:
-                self.predecessors.setdefault(succ, []).append(block.start_address)
 
 
     # ----- API DELLA CLASSE -----------------------
-    def create_graph(self, file: FileModelBinary, 
-                     disassembler: Disassembler,
-                     section : str = ".text") -> None:
-        
-        section_binary = file.binary.get_section(section)
+    def create_graph(self, file: FileModelBinary, section: str = ".text") -> None:
+        try:
+            if self.created:
+                logger.info("Graph already created. No need to recreate")
+                return
 
-        if not section_binary:
-            logger.error(f"Section {section_binary} ")
+            # --- inizializza disassembler ---
+            disassembler = create_disassembler(
+                file_type=file.type,
+                machine_identifier=file.get_machine_type(),
+                use_skipdata=False
+            )
+            if disassembler is None:
+                logger.error("Disassembler is None")
+                return
 
-        section_address = file.get_base_address() + section_binary.virtual_address
-        section_code = bytes(section_binary.content)
+            # --- ottieni sezione di codice ---
+            section_binary = file.binary.get_section(section)
+            if not section_binary:
+                raise ValueError(f"Section {section} not found")
 
-        instructions = disassembler.disassemble(codes=section_code, start_address=section_address)
-        if instructions is None or len(instructions)<= 0:
-            logger.warning("Cannot disassemble the instructions")
-            return None
-        else:
-            logger.info(f"Sono state individuate { len(instructions)} sitruzioni")
-    
-        #CREAZIONE DEL CONTROL FLOW GRAPH
-        terminators = self._find_terminators(instructions)
-        block: BasicBlock = None
-        for _, instr in enumerate(instructions):
-            if block is None:
-                block = BasicBlock(instr.address)
-            
-            block.add_instruction(instr)
+            section_address = file.get_base_address() + section_binary.virtual_address
+            if self._start_addres_base is None:
+                self._start_addres_base = section_address
 
-            if instr.address in terminators:
-                block.set_terminator(instr, terminators[instr.address])
-                self._add_block(block)
-                block = None  
-        
+            section_code = bytes(section_binary.content)
 
-        self._link_successors()
+            # --- disassemblaggio istruzioni ---
+            instructions: List[cap.CsInsn] = disassemble_bytes(
+                codes=section_code,
+                start_address=section_address,
+                dis=disassembler
+            )
+            if not instructions:
+                raise ValueError("Cannot disassemble the instructions")
+            logger.info(f"Found {len(instructions)} instructions")
 
+            # --- crea blocchi e aggiungi istruzioni ---
+            block: Optional[BasicBlock] = None
+
+            for instr in instructions:
+                term_type, is_conditional = is_terminator(instr)
+
+                # Se non esiste blocco corrente, creane uno nuovo
+                if block is None:
+                    block = BasicBlock(instr.address)
+
+                # Aggiungi istruzione al blocco
+                unique_ud, instruction_created = block.add_instruction(instr)
+                if unique_ud is None or instruction_created is None:
+                    raise ValueError(f"{instr.address} cannot generate UUID or instruction")
+                self._all_instructions_unordered.add(instruction_created)
+
+                # Se istruzione è terminatore, chiudi il blocco
+                if term_type is not None:
+                    block.set_terminator(instr, term_type, is_conditional)
+                    block_uuid = self._add_block(block)
+                    if block_uuid is None:
+                        raise ValueError(f"{block.start_address} UUID is None")
+                    self._all_blocks_ordered.add(block)
+                    block = None
+
+            # --- crea mappature e set utili ---
+            self._create_maps()
+            self._create_unequivalent_set()
+            self._create_unpermutable_set()
+
+            # --- collega blocchi successori ---
+            self._link_successors()
+
+            self.created = True
+
+        except Exception:
+            logger.error(traceback.format_exc())
+            self.created = False
+
+    def _link_successors(self, max_neigh: int = 5) -> None:
+        """
+        Associa a ogni blocco i suoi successori.
+        max_neigh indica il numero massimo di blocchi "vicini" da considerare.
+        """
+        for block in self._all_blocks_ordered:
+            # Se il blocco ha un terminatore, recuperiamo informazioni
+            instr = block.terminator
+            term_type = block.terminator_type
+            is_conditional = getattr(block, 'is_conditional', False)
+
+            successors: List[Tuple[str, int]] = []
+
+            # Blocchi vicini (fino a max_neigh) per fallback
+            near_blocks: List[BasicBlock] = self._get_near_blocks(block.uuid, max_neigh)
+
+            # Se il blocco termina con un jump/call condizionale o incondizionale
+            if term_type == TERMINATOR_TYPE.JUMP:
+                if is_conditional:
+                    # Condizionale: succede sia il target che il fall-through
+                    for b in near_blocks:
+                        successors.append((b.uuid, b.start_address))
+                else:
+                    # Incondizionale: solo il target
+                    for b in near_blocks:
+                        if b.start_address == instr.operands[0].imm:  # indirizzo jump
+                            successors.append((b.uuid, b.start_address))
+            elif term_type == TERMINATOR_TYPE.CALL:
+                # Chiamata: il successore naturale è il blocco seguente
+                for b in near_blocks:
+                    if b.start_address > block.end_address:
+                        successors.append((b.uuid, b.start_address))
+                        break
+            elif term_type in (TERMINATOR_TYPE.RETURN, TERMINATOR_TYPE.IRET, TERMINATOR_TYPE.INT, TERMINATOR_TYPE.SYSCALL):
+                # Terminatori che non hanno successori diretti
+                successors = []
+            else:
+                # Nessun terminatore noto: fallback ai blocchi vicini
+                for b in near_blocks:
+                    successors.append((b.uuid, b.start_address))
+
+            # Aggiungi i successori al blocco
+            block._add_successor(successors)
+
+
+    def _get_next_block(self, addr: int) -> Optional[BasicBlock]:
+        """
+        Restituisce il blocco con l'indirizzo più piccolo maggiore di addr.
+        """
+        for block in self._all_blocks_ordered:
+            if block.start_address > addr:
+                return block
+        return None
+
+    def _get_block_by_address(self, addr: int) -> Optional[BasicBlock]:
+        """
+        Restituisce il blocco che inizia all'indirizzo addr.
+        """
+        for block in self._all_blocks_ordered:
+            if block.start_address == addr:
+                return block
+        return None
+
+
+                    
+    """
     def get_block_start(self, address: int) -> Optional[int]:
         sorted_starts = sorted(self.blocks.keys())  # meglio se memorizzato già ordinato
         idx = bisect.bisect_right(sorted_starts, address) - 1
         if idx >= 0:
             return sorted_starts[idx]
         return None
+    """
+
+    def _get_near_blocks(self, cuurent_block_uuid: str, max_distance: int = 5) -> List[Tuple[str, int]]:
+        if cuurent_block_uuid is None or len(cuurent_block_uuid) <=0:
+            raise ValueError("A block's uuid is None")
+        
+        max_distance = max_distance if max_distance > 0 else 5
+
+        return self._all_blocks_ordered.get_next_from_items(cuurent_block_uuid, max_distance)
 
 
 
-    def _add_block(self, block: BasicBlock) -> None:
-        if block.start_address in self.block_start_address_set:
-            logger.warning(f"Block at {hex(block.start_address)} already exists. Skipping.")
-            return
+     
 
-        self.blocks[block.start_address] = block
-        self.block_start_address_set.add(block.start_address)
-        self.sorted_starts.append(block.start_address)
-        self.sorted_starts.sort()
 
-        self.predecessors.setdefault(block.start_address, [])
-        self.created = True
+    # FUNXIONE CHE MI RICALCOLA TUTTI GLI ADDRESS DELLE ISTRUZIONI
+    def ricalculate_all_addresses(self)-> None:
+        base_address: int = self._start_addres_base
+        for _, block in enumerate(self._all_blocks_ordered):
+           base_address= block.ricalcolate_addresses(base_address=base_address, return_end_address=True)
+
+        
+   
 
 
 
@@ -255,102 +326,54 @@ class EngineMetaCFG:
         logger.info(f"CFG saved in {file_path}")
 
 
-    # ----------------------------
-    # Helpers predecessori
-    # ----------------------------
-    def _update_predecessor_map(self, parent: BasicBlock, old_succ: int, new_succ: int) -> None:
-        if old_succ in self.predecessors:
-            self.predecessors[old_succ] = [p for p in self.predecessors[old_succ] if p != parent.start_address]
-        self.predecessors.setdefault(new_succ, []).append(parent.start_address)
-
-    # ----------------------------
-    # Swap fisico/logico
-    # ----------------------------
-    def _physically_swap_blocks(self, addr_a: int, addr_b: int) -> None:
-        block_a, block_b = self.blocks[addr_a], self.blocks[addr_b]
-        block_a.start_address, block_b.start_address = block_b.start_address, block_a.start_address
-        block_a.bind_engines(self.ks_engine, self.cs_engine)
-        block_b.bind_engines(self.ks_engine, self.cs_engine)
-        block_a.recalculate_addresses()
-        block_b.recalculate_addresses()
-        del self.blocks[addr_a], self.blocks[addr_b]
-        self.blocks[block_a.start_address] = block_a
-        self.blocks[block_b.start_address] = block_b
-        logger.info(f"Physical swap completed: {hex(addr_a)} ↔ {hex(addr_b)}")
-
-    def _logically_swap_blocks(self, addr_a: int, addr_b: int,
-                               preds_a: List[BasicBlock], preds_b: List[BasicBlock]) -> None:
-        modifications = (
-            [{"parent": p, "old": addr_a, "new": addr_b} for p in preds_a] +
-            [{"parent": p, "old": addr_b, "new": addr_a} for p in preds_b]
-        )
-
-        for mod in modifications:
-            parent = mod["parent"]
-            term = parent.terminator
-            if not term:
-                continue
-
-            mnemonic = term.mnemonic.lower()
-
-            # Se terminatore è senza operandi (ret, ecc.) salta
-            if mnemonic in self.ZERO_OPERAND_TERMINATORS:
-                continue
-
-            # Proviamo rel32, altrimenti long-jump
-            try:
-                seq = parent.build_jump_sequence(mnemonic, term.address, mod["new"])
-                if not seq:
-                    logger.warning(
-                        f"Impossibile ricreare terminatore '{mnemonic}' verso {hex(mod['new'])}, salto")
-                    continue
-
-                # Rimpiazza *solo* il terminatore con la nuova sequenza
-                parent.instructions = parent.instructions[:-1] + seq
-                parent.set_terminator(seq[-1], parent.terminator_type)
-                if mod["old"] in parent.successors:
-                    parent.successors.remove(mod["old"])
-                if mod["new"] not in parent.successors:
-                    parent.successors.append(mod["new"])
-                self._update_predecessor_map(parent, mod["old"], mod["new"])
-                logger.info(f"Logically swap completed")
-                parent.recalculate_addresses()
-
-                self.sorted_starts = sorted(self.blocks.keys())
-            except Exception as e:
-                logger.warning(
-                    f"Errore ricreando salto '{mnemonic}' a {hex(term.address)}: {e}, skip modifica")
-
-    # API pubblico per swap
-    def swap_blocks(self, addr_a: int, addr_b: int, physical: bool = False) -> None:
-        if addr_a not in self.blocks or addr_b not in self.blocks:
-            raise KeyError("Indirizzo di blocco non presente nel CFG")
-        if physical:
-            self._physically_swap_blocks(addr_a, addr_b)
-        else:
-            preds_a = [self.blocks[p] for p in self.predecessors.get(addr_a, []) if p in self.blocks]
-            preds_b = [self.blocks[p] for p in self.predecessors.get(addr_b, []) if p in self.blocks]
-            self._logically_swap_blocks(addr_a, addr_b, preds_a, preds_b)
-
-    # ----------------------------
-    # Ricostruzione globale degli indirizzi (tutti i blocchi)
-    # ----------------------------
-    def recalculate_all(self) -> None:
-        for b in self.blocks.values():
-            b.bind_engines(self.ks_engine, self.cs_engine)
-            b.recalculate_addresses()
-        self.link_successors()
+    
 
 
-    def get_code_instruction(self) -> List[cap.CsInsn]:
-        return [
-            instruction 
-            for blocco in self.blocks.values() 
-            for instruction in blocco.get_instruction()
-        ]
-
-    # ----------------------------
-    # Debug/Export
-    # ----------------------------
     def dump(self) -> List[dict]:
         return [blk.to_dict() for blk in sorted(self.blocks.values(), key=lambda x: x.start_address)]
+    
+
+    def to_asm(self) -> str:
+        output : str = ""
+        for _, block in enumerate(self._all_blocks_ordered):
+            output += str(block)
+
+        return output
+
+"""
+FLUSSO DI FUNZIONI
+
+- genrate_mutation() 
+
+    -create graph -->
+        => 
+        => Individuo e creo set per i TERMINATORI ==> set di indirizzi
+        => creo il grafo e suddivdo il codice a blocchi
+        => creo il dizionario: Indirizzo_originale-UUID --> Mappa: Indirizzo_orginale - UUID
+        => creo set per gli indirizzi puntati da JUMP / CALL --> UUID bloccati per le equivalenze
+        => creo mappa per le label: label_{uuid}
+
+        => PERMUTAZIONI
+            - capire quanto due istruzioni sono indipendenti
+              e se possono essere inveritie
+            - invertimento di blocchi
+        
+        => INSERIMENTO DI GARBAGE CODE --> quando la inserisco --> devo trovare
+            la size con un assemlber 
+
+        => RISOLUZIONE DI OPERAZIONI DI JUMP / CALL CHE NON HANNO UNA LABEL
+         --> mi ricavo l'indirizzo originale, trovo lo UUID della istruzione, 
+         --> e da li vado a calcolare il suo indirizzo sommando tutte le size
+
+
+        => EQUIVALENZE tra istuzioni
+
+
+
+
+
+TODO
+    - separare le 3 classi del grafo
+    
+
+"""

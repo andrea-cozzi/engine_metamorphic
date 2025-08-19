@@ -21,8 +21,8 @@ INTS = frozenset(["int","int3"])
 LOOPS = frozenset(["loop","loope","loopne","loopnz","loopz"])
 SYSCALLS = frozenset(["syscall","sysenter"])
 
-# Dizionario generale per lookup O(1)
-X86_FLOW_INSTRUCTIONS: dict[str, Tuple[TERMINATOR_TYPE,bool]] = {
+# Dizionario generale per lookup O(1
+X86_FLOW_INSTRUCTIONS: dict[str, Tuple[TERMINATOR_TYPE, bool]] = {
     **{mn: (TERMINATOR_TYPE.JUMP, False) for mn in UNCOND_JUMPS},
     **{mn: (TERMINATOR_TYPE.JUMP, True)  for mn in COND_JUMPS},
     **{mn: (TERMINATOR_TYPE.CALL, False) for mn in CALLS},
@@ -34,11 +34,14 @@ X86_FLOW_INSTRUCTIONS: dict[str, Tuple[TERMINATOR_TYPE,bool]] = {
 }
 
 def is_terminator(instruction: cap.CsInsn) -> Tuple[Optional[TERMINATOR_TYPE], bool]:
-    """Determina se un'istruzione è un terminatore di blocco (jump, call, return, ecc.)."""
-    
-    # Prima prova con Capstone groups
-    if getattr(instruction, "detail", None):
-        groups = instruction.detail.groups
+    """
+    Determina se un'istruzione è un terminatore di blocco 
+    (jump, call, return, iret, int, syscall, loop).
+    Ritorna una tupla: (tipo_terminatore, è_condizionale)
+    """
+    # Usa i gruppi se disponibili
+    if hasattr(instruction, "groups") and instruction.groups:
+        groups = instruction.groups
         if cap.CS_GRP_JUMP in groups:
             is_conditional = instruction.id != cap.x86.X86_INS_JMP
             return TERMINATOR_TYPE.JUMP, is_conditional
@@ -51,9 +54,12 @@ def is_terminator(instruction: cap.CsInsn) -> Tuple[Optional[TERMINATOR_TYPE], b
         if cap.CS_GRP_INT in groups:
             return TERMINATOR_TYPE.INT, False
 
-    # Fallback lookup precompilata
+    # Fallback: lookup tramite mnemonic
     mnemonic = instruction.mnemonic.lower()
-    return X86_FLOW_INSTRUCTIONS.get(mnemonic, (None, False))
+    if mnemonic in X86_FLOW_INSTRUCTIONS:
+        return X86_FLOW_INSTRUCTIONS[mnemonic]
+
+    return None, False
 
 
 def capstone_to_keystone(cs_arch, cs_mode):

@@ -33,7 +33,7 @@ class Parser:
         file.arch, file.mode = capstone_config
 
             
-    def parse(self, file_path : str) -> Optional[FileModelBinary]:
+    def parse_to_bytes(self, file_path : str) -> Optional[FileModelBinary]:
         if not file_path:
             raise ValueError(f"{file_path} cannot be empty")
         

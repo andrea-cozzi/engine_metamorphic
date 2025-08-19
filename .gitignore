@@ -5,3 +5,6 @@ output/
 *.json
 *.log
 TEMP_assebly_code_test.py
+check_exe.py
+*.asm
+__assembly_output/

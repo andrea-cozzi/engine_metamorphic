@@ -1,4 +1,3 @@
-from component.assembler import FasmAssembler
 from component.parser import Parser
 import logging
 import traceback
@@ -34,11 +33,12 @@ def main() -> None:
         print(f"[*] Analisi del file: {target_file_path}")
         
         parser: Parser = Parser()
-        file : file_model.FileModelBinary = parser.parse(target_file_path)
+        file : file_model.FileModelBinary = parser.parse_to_bytes(target_file_path)
         if file is None:
             raise RuntimeError()
         engine = engine_meta.MetamorphicEngine(model=file)
-        engine.create_graph_cfg(save_on_json=False)
+        engine.create_graph_cfg()
+        engine.test_save()
 
     except (ValueError, FileNotFoundError) as e: 
         print(f"\nERRORE CRITICO: {e}")
