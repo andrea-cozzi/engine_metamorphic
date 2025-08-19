@@ -83,6 +83,31 @@ class OrderedUUIDSet(Generic[T]):
         self._order.remove(current_item_uuid)
         del self._items[current_item_uuid]
         return True
+    
+
+    def index(self, item: T) -> int:
+        """
+        Restituisce l'indice dell'item nella sequenza.
+        Solleva ValueError se l'item non è presente.
+        """
+        uid = item.uuid
+        try:
+            return self._order.index(uid)
+        except ValueError:
+            raise ValueError(f"Item con uuid {uid} non trovato nella sequenza")
+        
+    def first(self) -> Optional[T]:
+        """Restituisce il primo elemento, oppure None se vuoto"""
+        if not self._order:
+            return None
+        return self._items[self._order[0]]
+
+    def last(self) -> Optional[T]:
+        """Restituisce l’ultimo elemento, oppure None se vuoto"""
+        if not self._order:
+            return None
+        return self._items[self._order[-1]]
+
 
     def __iter__(self) -> Iterator[T]:
         for uid in self._order:
@@ -97,3 +122,27 @@ class OrderedUUIDSet(Generic[T]):
     def get_by_uuid(self, uid: str) -> Optional[T]:
         """Restituisce l'oggetto con uuid dato, oppure solleva KeyError se non esiste"""
         return self._items[uid]
+
+    def __getitem__(self, index: int) -> T:
+        """Ritorna l'elemento in posizione index"""
+        uid = self._order[index]
+        return self._items[uid]
+    def __setitem__(self, index: int, value: T) -> None:
+        """Sostituisce l'elemento in posizione index con un nuovo valore"""
+        old_uid = self._order[index]
+        new_uid = value.uuid
+
+        # Se il nuovo uuid già esiste ma non è lo stesso slot → errore
+        if new_uid in self._items and new_uid != old_uid:
+            raise ValueError(f"UUID {new_uid} già presente in OrderedUUIDSet")
+
+        # Aggiorna ordine
+        self._order[index] = new_uid
+
+        # Rimuovi il vecchio dalla mappa se cambia uuid
+        if old_uid != new_uid:
+            del self._items[old_uid]
+
+        # Inserisci/aggiorna il nuovo
+        self._items[new_uid] = value
+

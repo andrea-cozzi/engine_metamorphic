@@ -38,7 +38,7 @@ def main() -> None:
             raise RuntimeError()
         engine = engine_meta.MetamorphicEngine(model=file)
         engine.create_graph_cfg()
-        engine.test_save()
+        engine.test_permutation()
 
     except (ValueError, FileNotFoundError) as e: 
         print(f"\nERRORE CRITICO: {e}")

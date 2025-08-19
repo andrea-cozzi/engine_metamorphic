@@ -2,6 +2,8 @@ import logging
 from pathlib import Path
 from typing import Optional
 from engine_meta.engine_cfg import EngineMetaCFG
+from engine_meta.model.basic_block import BasicBlock
+from engine_meta.permutor import permutate_instruction_random
 from engine_meta.utils.common_function import *
 from engine_meta.utils.save_to_file import *
 from model.file_model import FileModelBinary
@@ -73,3 +75,12 @@ class MetamorphicEngine:
     def test_save(self):
         output = self._graph.to_asm()
         save_to_assembly(output, file_name="assembly_prova.asm")
+
+
+    def test_permutation(self):
+        block: BasicBlock = list(self._graph._all_blocks_ordered)[1]
+        permutate_instruction_random(block=block)
+        output = self._graph.to_asm()
+        save_to_assembly(output, file_name="assembly_prova_permutazione.asm")
+
+

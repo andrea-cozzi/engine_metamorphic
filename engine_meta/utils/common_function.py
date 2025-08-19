@@ -57,24 +57,60 @@ def extract_jump_call_targets(instructions: List[cap.CsInsn],
     return banned_to_equi
 
 
-def are_permutable(ins1 : BasicInstruction, ins2 : BasicInstruction) -> bool:
+def are_permutable(ins1: BasicInstruction, ins2: BasicInstruction) -> bool:
+    """
+    Determina se due istruzioni possono essere permutate in sicurezza.
+    Tiene conto di:
+    - registri letti/scritti
+    - memoria letta/scritta
+    - stack e registri critici (rsp, rbp)
+    - flusso di controllo (jump/call/ret)
+    """
 
-    if ins1 is None or ins2 is None:
-        raise ValueError(f"One of the two instructions ot both is None")
-
-    if ins1.is_permutable is False or ins2.is_permutable is False:
+    if not ins1 or not ins2:
         return False
+    if not ins1.is_permutable or not ins2.is_permutable:
+        return False
+
+    # Registri critici da non permutare
+    critical_regs = {"rsp", "rbp"}
     
-    read_one, write_one = set(ins1.regs_read), set(ins1.regs_write)
-    read_two, write_two = set(ins2.regs_read), set(ins2.regs_write)
+    # Leggi/scrivi registri
+    read1, write1 = set(ins1.regs_read), set(ins1.regs_write)
+    read2, write2 = set(ins2.regs_read), set(ins2.regs_write)
 
-    if write_one & (read_two | write_two):
+    # Controllo registri critici
+    if (read1 | write1) & critical_regs or (read2 | write2) & critical_regs:
         return False
-    if write_two & (read_one | write_one):
+
+    # Controllo conflitti tra registri
+    if write1 & (read2 | write2):
+        return False
+    if write2 & (read1 | write1):
+        return False
+
+    # Conflitti tra memoria (se disponibili)
+    mem_read1 = set(getattr(ins1, "mem_read", []))
+    mem_write1 = set(getattr(ins1, "mem_write", []))
+    mem_read2 = set(getattr(ins2, "mem_read", []))
+    mem_write2 = set(getattr(ins2, "mem_write", []))
+
+    if mem_write1 & (mem_read2 | mem_write2):
+        return False
+    if mem_write2 & (mem_read1 | mem_write1):
+        return False
+
+    # Flusso di controllo
+    control_ops = {"jmp", "je", "jne", "call", "ret", "cmp", "test"}
+    if ins1.mnemonic in control_ops or ins2.mnemonic in control_ops:
+        return False
+
+    # Controllo dipendenze tra registri generali (opzionale avanzato)
+    # Se una istruzione legge un registro scritto dall’altra, non permutare
+    if (read1 & write2) or (read2 & write1):
         return False
 
     return True
-
 
 
 
