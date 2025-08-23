@@ -1,9 +1,6 @@
-from bisect import bisect, bisect_right
-import json
 import logging
-import pprint
 import traceback
-from typing import List, Dict, Optional, Set, Tuple
+from typing import Generator, List, Dict, Optional, Set, Tuple
 import capstone as cap
 import keystone as ks
 import lief as lf
@@ -36,8 +33,6 @@ NON_PERMUTABLE_GROUP = {
 COSTRUIRE UN MECCANISMO CHE SE è UN JUMP/CALL DEVE
 ESSERE INSERITA IN QUELLE CHE NON POSSONO ESSERE EQUIVALENTI
 """
-
-
 
 class EngineMetaCFG:
 
@@ -187,7 +182,7 @@ class EngineMetaCFG:
 
                 # Se istruzione è terminatore, chiudi il blocco
                 if term_type is not None:
-                    block.set_terminator(instr, term_type, is_conditional)
+                    block.set_terminator(instr, term_type, is_conditional, uuid=instruction_created.uuid)
                     block_uuid = self._add_block(block)
                     if block_uuid is None:
                         raise ValueError(f"{block.start_address} UUID is None")
@@ -208,49 +203,75 @@ class EngineMetaCFG:
             logger.error(traceback.format_exc())
             self.created = False
 
+    
+
+
+    def _get_operand_imm(self, op) -> Optional[int]:
+        """
+        Estrae l'indirizzo immediato da un operando.
+        Supporta sia oggetti Capstone che dict serializzati.
+        """
+        # Caso Capstone (X86)
+        if hasattr(op, "type") and hasattr(op, "imm"):
+            if op.type == cap.x86.X86_OP_IMM:
+                return op.imm
+            return None
+        # Caso dict serializzato
+        if isinstance(op, dict):
+            return op.get("imm")
+        return None
+
+
     def _link_successors(self, max_neigh: int = 5) -> None:
         """
         Associa a ogni blocco i suoi successori.
         max_neigh indica il numero massimo di blocchi "vicini" da considerare.
         """
         for block in self._all_blocks_ordered:
-            # Se il blocco ha un terminatore, recuperiamo informazioni
             instr = block.terminator
             term_type = block.terminator_type
-            is_conditional = getattr(block, 'is_conditional', False)
+            is_conditional = getattr(block, "is_conditional", False)
 
             successors: List[Tuple[str, int]] = []
+            near_blocks: List["BasicBlock"] = self._get_near_blocks(block.uuid, max_neigh)
 
-            # Blocchi vicini (fino a max_neigh) per fallback
-            near_blocks: List[BasicBlock] = self._get_near_blocks(block.uuid, max_neigh)
-
-            # Se il blocco termina con un jump/call condizionale o incondizionale
             if term_type == TERMINATOR_TYPE.JUMP:
                 if is_conditional:
-                    # Condizionale: succede sia il target che il fall-through
+                    # Jump condizionale: target + fall-through
                     for b in near_blocks:
                         successors.append((b.uuid, b.start_address))
                 else:
-                    # Incondizionale: solo il target
-                    for b in near_blocks:
-                        if b.start_address == instr.operands[0].imm:  # indirizzo jump
-                            successors.append((b.uuid, b.start_address))
+                    # Jump incondizionale: solo il target immediato
+                    target_addr = None
+                    if instr.operands:
+                        target_addr = self._get_operand_imm(instr.operands[0])
+
+                    if target_addr is not None:
+                        for b in near_blocks:
+                            if b.start_address == target_addr:
+                                successors.append((b.uuid, b.start_address))
             elif term_type == TERMINATOR_TYPE.CALL:
-                # Chiamata: il successore naturale è il blocco seguente
+                # Call: il successore naturale è il blocco subito dopo
                 for b in near_blocks:
                     if b.start_address > block.end_address:
                         successors.append((b.uuid, b.start_address))
                         break
-            elif term_type in (TERMINATOR_TYPE.RETURN, TERMINATOR_TYPE.IRET, TERMINATOR_TYPE.INT, TERMINATOR_TYPE.SYSCALL):
-                # Terminatori che non hanno successori diretti
+            elif term_type in (
+                TERMINATOR_TYPE.RETURN,
+                TERMINATOR_TYPE.IRET,
+                TERMINATOR_TYPE.INT,
+                TERMINATOR_TYPE.SYSCALL,
+            ):
+                # Terminatori senza successori diretti
                 successors = []
             else:
-                # Nessun terminatore noto: fallback ai blocchi vicini
+                # Fallback: considera i blocchi vicini
                 for b in near_blocks:
                     successors.append((b.uuid, b.start_address))
 
             # Aggiungi i successori al blocco
             block._add_successor(successors)
+
 
 
     def _get_next_block(self, addr: int) -> Optional[BasicBlock]:
@@ -308,39 +329,14 @@ class EngineMetaCFG:
 
 
     # --- FUNZIONI UTILI -----
-    def save_to_json(self, file_path: str = "cfg.json", open_mode: str = 'w'):
-        if len(file_path) <= 0 or not (open_mode == 'w' or open_mode == 'a'):
-            logger.warning("params to save_to_json are not valid")
-            return
-
-        with open(file_path, open_mode) as file:
-            serializable_cfg = {hex(addr): block.to_dict() for addr, block in self.blocks.items()}
-            json_dump = {
-                "block_number": len(self.blocks.keys()),
-                "created": True if self.created else False,
-                "blocks": serializable_cfg
-            }
-           
-            json.dump(json_dump, file, indent=2)
-
-        logger.info(f"CFG saved in {file_path}")
-
-
-    
-
 
     def dump(self) -> List[dict]:
         return [blk.to_dict() for blk in sorted(self.blocks.values(), key=lambda x: x.start_address)]
     
-
-    def to_asm(self) -> str:
-        output : str = ""
+    def to_asm(self) -> Generator[str, None, None]:
         for _, block in enumerate(self._all_blocks_ordered):
-            output += str(block)
-
-        return output
-    
-    
+            yield block.to_asm() + "\n"
+        
 
 """
 FLUSSO DI FUNZIONI

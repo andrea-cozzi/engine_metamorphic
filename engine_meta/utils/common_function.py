@@ -5,28 +5,62 @@ from typing import Dict, List, Optional, Set
 from engine_meta.model.basic_instruction import BasicInstruction
 import re
 import capstone as cap
+import keystone as ks
+import lief as lf
 
 logger= logging.getLogger(__name__)
+
+# ==== FUNXIONE PER OTTENERE LE MODALITà PER I DUE COMPONENTI ====
+def get_component_modes(binary: lf.Binary):
+    """
+    Restituisce le modalità Capstone e Keystone per un binario x86/x64.
+    Considera solo little-endian (x86).
+    """
+    if isinstance(binary, lf.PE.Binary):
+        arch = binary.header.machine.name
+    elif isinstance(binary, lf.ELF.Binary):
+        arch = binary.header.machine_type.name
+    else:
+        raise TypeError(f"Tipo di binario non supportato: {type(binary)}")
+
+    if arch in (lf.ELF.ARCH.X86_64.name, lf.PE.Header.MACHINE_TYPES.AMD64.name):
+        cs_arch, cs_mode = cap.CS_ARCH_X86, cap.CS_MODE_64
+        ks_arch, ks_mode = ks.KS_ARCH_X86, ks.KS_MODE_64
+        
+    elif arch in (lf.ELF.ARCH.I386.name, lf.PE.Header.MACHINE_TYPES.I386.name):
+        cs_arch, cs_mode = cap.CS_ARCH_X86, cap.CS_MODE_32
+        ks_arch, ks_mode = ks.KS_ARCH_X86, ks.KS_MODE_32
+        
+    else:
+        raise NotImplementedError(f"Architettura non supportata: {arch}")
+
+    return {
+        "capstone": (cs_arch, cs_mode),
+        "keystone": (ks_arch, ks_mode)
+    }
+# ==================================================
+
+
+
+
+
 
 # Equivalenze corrette e più sicure
 EQUIVALENCES = {
     "mov": {
         "reg, 0": ["xor reg, reg", "sub reg, reg"],
-        # "mov reg1, reg2" is tricky. push/pop affects the stack.
-        # Let's keep it simple for now or use lea if applicable.
-        # "mov reg, reg" is often optimized out, but push/pop is a valid, though expensive, equivalent.
         "reg, reg": ["push reg2;pop reg1"], 
         "reg, imm": ["push imm;pop reg"]
     },
     "add": {
         "reg1, reg2": ["sub reg1, -reg2", "lea reg1, [reg1 + reg2]"],
         "reg, 1": ["inc reg", "sub reg, -1"],
-        "reg, imm": ["sub reg, -imm"] # Corrected equivalence
+        "reg, imm": ["sub reg, -imm"] 
     },
     "sub": {
         "reg1, reg2": ["add reg1, -reg2"],
-        "reg, 1": ["dec reg"], # dec is the most common equivalent
-        "reg, imm": ["add reg, -imm"] # Corrected equivalence
+        "reg, 1": ["dec reg"], 
+        "reg, imm": ["add reg, -imm"] 
     },
     "nop": {
         "": ["xchg eax, eax", "mov eax, eax", "push eax;pop eax"]

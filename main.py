@@ -2,43 +2,49 @@ from component.parser import Parser
 import logging
 import traceback
 import lief
+from constant_var import PATH_EXE
 from model import file_model
-from engine_meta import engine_meta
+from engine_meta.engine import MetamorphicEngine
 from datetime import datetime
 
 from check_exe import compare_executables
+from constant_var import DEBUG_MODE
+
+if DEBUG_MODE:
+    log_level = logging.INFO
+else:
+    log_level = logging.WARNING
+
+
+
+logging.basicConfig(
+    level=log_level, 
+    format='%(asctime)s - %(levelname)s - [%(module)s] - %(message)s',
+    filename='engine_metamorphic.log',  
+    filemode='w' 
+)
 
 
 
 def main() -> None:
-
-    logging.basicConfig(
-        level=logging.INFO,  # Livello minimo dei messaggi da registrare (es. INFO, DEBUG, ERROR)
-        format='%(asctime)s - %(levelname)s - [%(module)s] - %(message)s', # Formato dei messaggi
-        filename='engine_metamorphic.log',  # Nome del file di log
-        filemode='w'  # 'w' per sovrascrivere il log a ogni esecuzione, 'a' per aggiungere in coda
-    )
 
     # --- INIZIO ESECUZIONE ---
     start_time = datetime.now()
     print(f"[*] Script started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("-" * 40)
 
-
-    logger = logging.getLogger(__name__)
     try:
-
-        target_file_path = "C:\\Users\\andrea.cozzi\\Desktop\\main_small.exe"
-        tagert_file_output = "C:\\Users\\andrea.cozzi\\Desktop\\main_small_modificato.exe"
-        print(f"[*] Analisi del file: {target_file_path}")
+        print(f"[*] Analisi del file: {PATH_EXE}")
         
         parser: Parser = Parser()
-        file : file_model.FileModelBinary = parser.parse_to_bytes(target_file_path)
+        file : file_model.FileModelBinary = parser.parse_to_bytes(PATH_EXE)
         if file is None:
             raise RuntimeError()
-        engine = engine_meta.MetamorphicEngine(model=file)
-        engine.create_graph_cfg()
-        engine.test_permutation()
+        engine: MetamorphicEngine = MetamorphicEngine(model=file)
+        
+        engine.metamorph()
+        
+
 
     except (ValueError, FileNotFoundError) as e: 
         print(f"\nERRORE CRITICO: {e}")

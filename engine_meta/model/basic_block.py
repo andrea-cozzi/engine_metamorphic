@@ -2,11 +2,12 @@ import hashlib
 import logging
 import random
 import traceback
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Generator, List, Optional, Tuple
 import capstone as cap
 from engine_meta.model.basic_instruction import BasicInstruction
 from engine_meta.model.ordered_uuidset import OrderedUUIDSet
 from engine_meta.utils.common_function import are_permutable
+from constant_var import SAVE_ASM_CODE_MULTILINE, SAVE_ASM_SHOW_ADDRESS
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class BasicBlock:
         self.end_address: int = start_address  # indirizzo subito dopo l'ultima istruzione
         self.instructions: OrderedUUIDSet[BasicInstruction] = OrderedUUIDSet()
         self.successors: Dict[str, int] = {}
-        self.terminator: Optional[cap.CsInsn] = None
+        self.terminator: Optional[BasicInstruction] = None
         self.terminator_type: Optional[str] = None
         self.is_conditional: bool = False
         self.label = LABEL_BLOCK.format(start_address)
@@ -55,10 +56,10 @@ class BasicBlock:
         instruction: cap.CsInsn, 
         term_type: str, 
         is_conditional: bool = False, 
-        add_to_block: bool = False
+        add_to_block: bool = False,
+        uuid: Optional[str] = None
     ) -> None:
         """Imposta il terminatore del blocco e aggiorna end_address se necessario."""
-        self.terminator = instruction
         self.terminator_type = term_type
         self.is_conditional = is_conditional
         self.end_address = max(self.end_address, instruction.address + instruction.size)
@@ -68,9 +69,21 @@ class BasicBlock:
             if not instruction_form:
                 raise ValueError(f"Instruction at {instruction.address} cannot be converted to BasicInstruction")
             self.instructions.add(instruction_form)
+        elif add_to_block is False and len(uuid) > 0:
+            instruction_form = self.instructions.get_by_uuid(uid=uuid)
+        
+        else:
+            raise ValueError("set_terminator: param configuration is not valid")
 
-    def get_instruction_at(self, address: int) -> Optional["BasicInstruction"]:
+        self.terminator = instruction_form
+
+    def get_instruction_addredd(self, address: int) -> Optional["BasicInstruction"]:
         return self.instructions_map_address.get(address)
+    
+    def get_instruction_uuid(self, uuid: str) -> Optional["BasicInstruction"]:
+        if uuid is None or len(uuid) <= 0:
+            return None
+        return self.instructions.get_by_uuid(uuid)
 
     def get_block_size(self) -> Optional[int]:
         try:
@@ -82,6 +95,7 @@ class BasicBlock:
     # ==== Funzioni di utilità ====
     def to_dict(self) -> dict:
         return {
+            "uuid": self.uuid,
             "start_address": hex(self.start_address),
             "count": len(self.instructions),
             "instructions": [
@@ -98,12 +112,6 @@ class BasicBlock:
 
     def get_instruction(self) -> List[BasicInstruction]:
         return list(self.instructions)
-
-    def __str__(self) -> str:
-        output = f"{self.label}:\n"
-        for instruction in self.instructions:
-            output += str(instruction)
-        return output + "\n"
 
     def is_block_permutable(self) -> bool:
         if not self.instructions:
@@ -147,18 +155,19 @@ class BasicBlock:
         for uuid, addr in uuids:
             self.successors[uuid] = addr
 
+
     # === Nuova funzione per ottenere codice assembly come stringa ===
-    def __str__(self) -> str:
-        output: str = f"{self.label}:\n"
-        for instr in self.instructions:
-            output += str(instr) + "\n"
+    from typing import Generator
 
-            # Se è il terminatore → aggiungi separatore
-            if instr == self.terminator:
-                output += "-------\n"
-        return output
-
-
-    @staticmethod
-    def blocks_to_asm_str(blocks: List["BasicBlock"], show_addresses: bool = False) -> str:
-        return "\n\n".join(block.to_asm_str(show_addresses=show_addresses) for block in blocks)
+    def to_asm(self) -> str:
+        def get_lines_generator() -> Generator[str, None, None]:
+            yield f"{self.label}:"
+            
+            for instr in self.instructions:
+                if SAVE_ASM_SHOW_ADDRESS:
+                    line = f"{instr.address:#x}:\t{instr.mnemonic} {instr.op_str}"
+                else:
+                    line = f"{instr.mnemonic}\t{instr.op_str}"
+                yield line
+                
+        return "\n".join(get_lines_generator())
