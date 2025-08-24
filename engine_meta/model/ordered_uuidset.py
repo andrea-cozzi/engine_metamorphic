@@ -84,6 +84,21 @@ class OrderedUUIDSet(Generic[T]):
         del self._items[current_item_uuid]
         return True
     
+    def add_after_remove(self, after_uuid: str, item: T) -> None:
+        """
+        Aggiunge `item` subito dopo `after_uuid`.
+        Se un elemento con lo stesso UUID di `item` esiste già altrove, lo rimuove.
+        """
+        uid = item.uuid
+
+        # Rimuove eventuale duplicato
+        if uid in self._items:
+            self.remove(uid)
+
+        # Aggiunge dopo after_uuid
+        self.add_after(after_uuid, item)
+
+        
 
     def index(self, item: T) -> int:
         """

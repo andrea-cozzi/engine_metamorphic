@@ -161,7 +161,7 @@ class BasicBlock:
 
     def to_asm(self) -> str:
         def get_lines_generator() -> Generator[str, None, None]:
-            yield f"{self.label}:"
+            yield f"label_{self.start_address}:"
             
             for instr in self.instructions:
                 if SAVE_ASM_SHOW_ADDRESS:
