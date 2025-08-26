@@ -2,11 +2,12 @@ import hashlib
 import logging
 import random
 from typing import Dict, List, Optional, Set
-from engine_meta.model.basic_instruction import BasicInstruction
 import re
 import capstone as cap
 import keystone as ks
 import lief as lf
+
+from metamorphic_engine.model.basic_instruction import BasicInstruction
 
 logger= logging.getLogger(__name__)
 

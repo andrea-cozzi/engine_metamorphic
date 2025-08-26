@@ -1,15 +1,17 @@
+from copy import deepcopy
 import logging
 import random
-import json
 from pathlib import Path
-from typing import Optional, List, Tuple
-from engine_meta.cfg import EngineMetaCFG
-from engine_meta.component.equivalent_switcher import EquivalentSwitcher
-from engine_meta.component.garbage_generator import GarbageGenerator
-from engine_meta.component.permutor import Permutator
-from engine_meta.model.basic_block import BasicBlock
-from engine_meta.utils.common_function import get_component_modes
-from engine_meta.utils.save_to_file import FileUtils
+from typing import Dict, Optional, List
+from metamorphic_engine.cfg import EngineMetaCFG
+from metamorphic_engine.component.equivalent_switcher import EquivalentSwitcher
+from metamorphic_engine.component.garbage_generator import GarbageGenerator
+from metamorphic_engine.component.permutor import Permutator
+from metamorphic_engine.model.basic_block import BasicBlock
+from metamorphic_engine.model.basic_instruction import BasicInstruction
+from metamorphic_engine.model.ordered_uuidset import OrderedUUIDSet
+from metamorphic_engine.utils.common_function import get_component_modes
+from metamorphic_engine.utils.save_to_file import FileUtils
 from model.file_model import FileModelBinary
 from constant_var import *
 
@@ -59,25 +61,62 @@ class MetamorphicEngine:
     # -----------------------------
     # MAIN METHOD
     # -----------------------------
-    def metamorph(self, section: str = ".text") -> None:
-        """Esegue la metamorfosi completa sul binario."""
-        saved: bool = False
-        for index in range(NUMBER_MUTATION):
-            self.create_graph_cfg(section=section)
-            if SAVE_ASM_DECODED and not saved:
-                self.test_save()
-                saved = True
 
-            self._auto_adjust_probabilities(target_mutations=25)
+    def metamorph(
+        self,
+        section: str = ".text",
+        return_params: bool = True
+    ) -> Optional[List[Dict[str, OrderedUUIDSet[BasicInstruction]]]]:
+        """Esegue la metamorfosi completa sul binario."""
+
+        return_values: List[Dict[str, OrderedUUIDSet[BasicInstruction]]] = []
+
+        # Costruzione grafo
+        self.create_graph_cfg(section=section)
+
+        if SAVE_ASM_DECODED:
+            self.test_save()
+
+        # Ottimizza probabilità di mutazione
+        self._auto_adjust_probabilities(target_mutations=25)
+
+        original_graph = self._graph.clone()
+
+        # Aggiungi versione originale
+        if return_params:
+            return_values.append({
+                self.file.file_name: self._graph.get_all_instruction()
+            })
+
+        # Ciclo mutazioni
+        for index in range(NUMBER_MUTATION):
+            self._graph = original_graph.clone()
             self._mutate_cfg()
+            
             mutated_file = self._save_mutation(index=index)
             self.mutated_files.append(mutated_file)
 
-        self.save_mutation_report_json()
+            if return_params:
+                return_values.append({
+                    mutated_file: self._graph.get_all_instruction()
+                })
+
+            self._graph = None  # reset esplicito
+
+        # Salva report finale
+        FileUtils.save_mutation_report_json(mutated_files=self.mutated_files, file_path=self.file.file_path)
+
+        return return_values if return_params else None
+
+            
+
+
     # -----------------------------
     # CFG
     # -----------------------------
     def create_graph_cfg(self, section: str = ".text") -> None:
+        if self._graph is not None:
+            raise ValueError(f"Graph is not none --> error")
         graph = EngineMetaCFG()
         graph.create_graph(file=self.file, section=section)
 
@@ -163,61 +202,4 @@ class MetamorphicEngine:
         file_name = f"{p.stem}_NO_MUTATO.asm"
         FileUtils.save_to_assembly(output, file_name=file_name)
 
-    # -----------------------------
-    # ANALISI MUTAZIONE JSON
-    # -----------------------------
-    @staticmethod
-    def compare_asm_files(file_original_name: str, file_mutated_name: str) -> Tuple[int, int, int, float]:
-        """
-        Confronta due file ASM in ASSEMBLY_OUTPUT_PATH e restituisce:
-        - numero righe originali
-        - righe effettivamente modificate
-        - righe aggiunte o rimosse
-        - percentuale di modifiche reali rispetto al file originale
-        """
-        file_original = Path(ASSEMBLY_OUTPUT_PATH) / file_original_name
-        file_mutated = Path(ASSEMBLY_OUTPUT_PATH) / file_mutated_name
-
-        with open(file_original, 'r', encoding='utf-8', errors='ignore') as f:
-            lines_orig = [line.strip() for line in f if line.strip()]
-
-        with open(file_mutated, 'r', encoding='utf-8', errors='ignore') as f:
-            lines_mut = [line.strip() for line in f if line.strip()]
-
-        num_orig = len(lines_orig)
-        modificate = 0
-        min_len = min(len(lines_orig), len(lines_mut))
-        for i in range(min_len):
-            if lines_orig[i] != lines_mut[i]:
-                modificate += 1
-
-        aggiunte_rimosse = abs(len(lines_orig) - len(lines_mut))
-        percent_mod = (modificate / num_orig) * 100 if num_orig > 0 else 0.0
-
-        return num_orig, modificate, aggiunte_rimosse, percent_mod
-
-    def save_mutation_report_json(self):
-        """
-        Salva un report JSON dei file mutati, con righe modificate, aggiunte/rimosse e percentuale reale.
-        """
-        if not self.mutated_files:
-            return
-
-        p = Path(self.file.file_path)
-        original_file = f"{p.stem}_NO_MUTATO.asm"
-        report = []
-
-        for f in self.mutated_files:
-            num_orig, modificate, aggiunte_rimosse, percent_mod = self.compare_asm_files(original_file, f)
-            report.append({
-                "file_mutato": f,
-                "righe_originali": num_orig,
-                "righe_modificate": modificate,
-                "righe_aggiunte_o_rimosse": aggiunte_rimosse,
-                "percentuale_modificata": percent_mod
-            })
-
-        with open(Path(REPORT_JSON_PATH) / FILENAME_JSON_REPORT, "w", encoding="utf-8") as jf:
-            json.dump(report, jf, indent=4)
-
-        logger.info(f"Report JSON salvato in {FILENAME_JSON_REPORT}")
+   

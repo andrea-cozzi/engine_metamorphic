@@ -2,7 +2,7 @@ import logging
 from typing import List, Optional, Union
 import keystone as ks
 import capstone as cs
-from engine_meta.model.basic_instruction import BasicInstruction
+from metamorphic_engine.model.basic_instruction import BasicInstruction
 
 logger = logging.getLogger(__name__)
 

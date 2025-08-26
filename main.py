@@ -1,10 +1,12 @@
+from typing import List
 from component.parser import Parser
 import logging
 import traceback
 import lief
 from constant_var import PATH_EXE
+from feature_extractor.extractor import BinaryFeatureExtractor
+from metamorphic_engine.engine import MetamorphicEngine
 from model import file_model
-from engine_meta.engine import MetamorphicEngine
 from datetime import datetime
 
 from check_exe import compare_executables
@@ -42,7 +44,14 @@ def main() -> None:
             raise RuntimeError()
         engine: MetamorphicEngine = MetamorphicEngine(model=file)
         
-        engine.metamorph()
+        data= engine.metamorph()
+        BinaryFeatureExtractor.run_analysis(original_executable=file,
+                                            arch_cs=engine.cs_arch,
+                                            mode_cs=engine.cs_mode,
+                                            from_mutation=True,
+                                            mutated_data=data
+                                            )
+        
         
 
 

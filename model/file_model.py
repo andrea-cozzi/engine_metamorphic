@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Optional, Union
 import lief as lf
 from shared.constants import BinaryType
@@ -7,6 +8,7 @@ class FileModelBinary:
 
     def __init__(self, binary: lf.Binary, file_path : str, binary_type: BinaryType):
         self.file_path: str = file_path
+        self.file_name = Path(file_path).stem
         self.binary: Optional[lf.Binary] = binary
         self.type: Optional[BinaryType] = binary_type
         self.arch: Optional[int] = None

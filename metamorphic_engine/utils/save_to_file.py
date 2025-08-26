@@ -2,12 +2,12 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
-from typing import Generator
+from typing import Generator, Tuple
 import logging
 
-from constant_var import ASSEMBLY_OUTPUT_PATH, JSON_CFG_OUTPUT_PATH
+from constant_var import ASSEMBLY_OUTPUT_PATH, FILENAME_JSON_REPORT, JSON_CFG_OUTPUT_PATH, REPORT_JSON_PATH
+from metamorphic_engine.cfg import EngineMetaCFG
 
-from engine_meta.cfg import EngineMetaCFG
 
 # Le costanti e il logger rimangono a livello di modulo
 ASSEMBLY_PATH = Path(ASSEMBLY_OUTPUT_PATH)
@@ -100,3 +100,64 @@ class FileUtils:
                 logger.info(f"CFG salvato in {target_path}")
             except Exception:
                 logger.error(f"Errore durante il salvataggio del CFG in {file_name}", exc_info=True)
+
+
+ # -----------------------------
+    # ANALISI MUTAZIONE JSON
+    # -----------------------------
+    @staticmethod
+    def compare_asm_files(file_original_name: str, file_mutated_name: str) -> Tuple[int, int, int, float]:
+        """
+        Confronta due file ASM in ASSEMBLY_OUTPUT_PATH e restituisce:
+        - numero righe originali
+        - righe effettivamente modificate
+        - righe aggiunte o rimosse
+        - percentuale di modifiche reali rispetto al file originale
+        """
+        file_original = Path(ASSEMBLY_OUTPUT_PATH) / file_original_name
+        file_mutated = Path(ASSEMBLY_OUTPUT_PATH) / file_mutated_name
+
+        with open(file_original, 'r', encoding='utf-8', errors='ignore') as f:
+            lines_orig = [line.strip() for line in f if line.strip()]
+
+        with open(file_mutated, 'r', encoding='utf-8', errors='ignore') as f:
+            lines_mut = [line.strip() for line in f if line.strip()]
+
+        num_orig = len(lines_orig)
+        modificate = 0
+        min_len = min(len(lines_orig), len(lines_mut))
+        for i in range(min_len):
+            if lines_orig[i] != lines_mut[i]:
+                modificate += 1
+
+        aggiunte_rimosse = abs(len(lines_orig) - len(lines_mut))
+        percent_mod = (modificate / num_orig) * 100 if num_orig > 0 else 0.0
+
+        return num_orig, modificate, aggiunte_rimosse, percent_mod
+
+    @staticmethod
+    def save_mutation_report_json(mutated_files, file_path):
+        """
+        Salva un report JSON dei file mutati, con righe modificate, aggiunte/rimosse e percentuale reale.
+        """
+        if not mutated_files:
+            return
+
+        p = Path(file_path)
+        original_file = f"{p.stem}_NO_MUTATO.asm"
+        report = []
+
+        for f in mutated_files:
+            num_orig, modificate, aggiunte_rimosse, percent_mod = FileUtils.compare_asm_files(original_file, f)
+            report.append({
+                "file_mutato": f,
+                "righe_originali": num_orig,
+                "righe_modificate": modificate,
+                "righe_aggiunte_o_rimosse": aggiunte_rimosse,
+                "percentuale_modificata": percent_mod
+            })
+
+        with open(Path(REPORT_JSON_PATH) / FILENAME_JSON_REPORT, "w", encoding="utf-8") as jf:
+            json.dump(report, jf, indent=4)
+
+        logger.info(f"Report JSON salvato in {FILENAME_JSON_REPORT}")

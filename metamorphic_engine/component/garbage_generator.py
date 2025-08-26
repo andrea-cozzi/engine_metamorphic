@@ -4,8 +4,8 @@ import re
 import traceback
 from typing import List, Optional, Set, Tuple, Sequence
 
-from engine_meta.factory.instruction_factory import InstructionFactoryStatic
-from engine_meta.model.basic_block import BasicBlock
+from metamorphic_engine.factory.instruction_factory import InstructionFactoryStatic
+from metamorphic_engine.model.basic_block import BasicBlock
 from constant_var import (
     MAX_BLOCK_OBFUSCATION,
     PRO_ADD_DEAD_CODE,
@@ -15,8 +15,8 @@ from constant_var import (
     MIN_NOP_INSTRUCTION_BLOCK,
     MAX_NOP_INSTRUCTION_BLOCK,
 )
-from engine_meta.model.basic_instruction import BasicInstruction
-from engine_meta.model.ordered_uuidset import OrderedUUIDSet
+from metamorphic_engine.model.basic_instruction import BasicInstruction
+from metamorphic_engine.model.ordered_uuidset import OrderedUUIDSet
 
 logger = logging.getLogger("garbage_generator")
 

@@ -25,10 +25,10 @@ import logging
 import capstone as cs
 
 
-from engine_meta.factory.instruction_factory import InstructionFactoryStatic
-from engine_meta.model.basic_block import BasicBlock
-from engine_meta.model.basic_instruction import BasicInstruction
-from engine_meta.model.ordered_uuidset import OrderedUUIDSet
+from metamorphic_engine.factory.instruction_factory import InstructionFactoryStatic
+from metamorphic_engine.model.basic_block import BasicBlock
+from metamorphic_engine.model.basic_instruction import BasicInstruction
+from metamorphic_engine.model.ordered_uuidset import OrderedUUIDSet
 
 
 logger = logging.getLogger(__name__)

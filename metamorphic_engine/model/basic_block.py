@@ -3,10 +3,12 @@ import logging
 import random
 import traceback
 from typing import Dict, Generator, List, Optional, Tuple
+
 import capstone as cap
-from engine_meta.model.basic_instruction import BasicInstruction
-from engine_meta.model.ordered_uuidset import OrderedUUIDSet
-from engine_meta.utils.common_function import are_permutable
+
+from metamorphic_engine.model.basic_instruction import BasicInstruction
+from metamorphic_engine.model.ordered_uuidset import OrderedUUIDSet
+from metamorphic_engine.utils.common_function import are_permutable
 from constant_var import SAVE_ASM_CODE_MULTILINE, SAVE_ASM_SHOW_ADDRESS
 
 logger = logging.getLogger(__name__)
@@ -69,9 +71,8 @@ class BasicBlock:
             if not instruction_form:
                 raise ValueError(f"Instruction at {instruction.address} cannot be converted to BasicInstruction")
             self.instructions.add(instruction_form)
-        elif add_to_block is False and len(uuid) > 0:
+        elif not add_to_block and uuid and len(uuid) > 0:
             instruction_form = self.instructions.get_by_uuid(uid=uuid)
-        
         else:
             raise ValueError("set_terminator: param configuration is not valid")
 
@@ -87,11 +88,12 @@ class BasicBlock:
 
     def get_block_size(self) -> Optional[int]:
         try:
-            return sum(instr.size for instr in self.instructions)
+            # La size è in byte e deve essere calcolata sull'istruzione originale, non sul wrapper
+            return sum(instr.original_object.size for instr in self.instructions)
         except Exception:
             logger.error(traceback.format_exc())
             return None
-
+    
     # ==== Funzioni di utilità ====
     def to_dict(self) -> dict:
         return {
@@ -103,7 +105,7 @@ class BasicBlock:
                     "address": hex(instr.address),
                     "mnemonic": instr.mnemonic,
                     "op_str": instr.op_str,
-                    "bytes": getattr(instr, 'bytes', b'').hex() if hasattr(instr, 'bytes') else ""
+                    "bytes": getattr(instr.original_object, 'bytes', b'').hex() if instr.original_object else ""
                 }
                 for instr in self.instructions
             ],
@@ -127,7 +129,8 @@ class BasicBlock:
 
         for instruction in self.instructions:
             instruction.address = address
-            address += instruction.size
+            # la size viene letta dall'oggetto originale capstone, quindi non va aggiornata
+            address += instruction.original_object.size
 
         self.end_address = address
         return self.end_address if return_end_address else None
@@ -155,19 +158,45 @@ class BasicBlock:
         for uuid, addr in uuids:
             self.successors[uuid] = addr
 
+    def clone(self) -> "BasicBlock":
+        """
+        Crea e restituisce una copia profonda (un nuovo oggetto) di questo blocco.
+        Tutte le istruzioni interne vengono clonate a loro volta.
+        """
+        new_block = BasicBlock(self.start_address)
+
+        # 2. Copia gli attributi semplici
+        new_block.end_address = self.end_address
+        new_block.terminator_type = self.terminator_type
+        new_block.is_conditional = self.is_conditional
+        new_block.label = self.label
+        new_block.uuid = self.uuid  
+        new_block.successors = self.successors.copy() 
+
+        # 3. Esegui una copia profonda delle istruzioni e popola 
+        for instruction in self.instructions:
+            cloned_instruction = instruction.clone()
+            new_block.instructions.add(cloned_instruction)
+            new_block.instructions_map_address[cloned_instruction.address] = cloned_instruction
+            new_block.instructions_map_uuid[cloned_instruction.uuid] = cloned_instruction
+
+       
+        if self.terminator:
+            cloned_terminator = new_block.instructions_map_uuid.get(self.terminator.uuid)
+            new_block.terminator = cloned_terminator
+
+        return new_block
 
     # === Nuova funzione per ottenere codice assembly come stringa ===
-    from typing import Generator
-
     def to_asm(self) -> str:
         def get_lines_generator() -> Generator[str, None, None]:
-            yield f"label_{self.start_address}:"
+            yield f"{self.label}:"
             
             for instr in self.instructions:
                 if SAVE_ASM_SHOW_ADDRESS:
-                    line = f"{instr.address:#x}:\t{instr.mnemonic} {instr.op_str}"
+                    line = f"    {instr.address:#x}:\t{instr.mnemonic} {instr.op_str}"
                 else:
-                    line = f"{instr.mnemonic}\t{instr.op_str}"
+                    line = f"    {instr.mnemonic}\t{instr.op_str}"
                 yield line
                 
         return "\n".join(get_lines_generator())

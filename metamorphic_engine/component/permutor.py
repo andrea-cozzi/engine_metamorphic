@@ -4,10 +4,10 @@ from typing import Optional, Set
 
 import networkx as nx
 
-from engine_meta.model.basic_block import BasicBlock
-from engine_meta.model.basic_instruction import BasicInstruction
-from engine_meta.utils.common_function import are_permutable
-from engine_meta.model.ordered_uuidset import OrderedUUIDSet
+from metamorphic_engine.model.basic_block import BasicBlock
+from metamorphic_engine.model.basic_instruction import BasicInstruction
+from metamorphic_engine.utils.common_function import are_permutable
+from metamorphic_engine.model.ordered_uuidset import OrderedUUIDSet
 
 logger = logging.getLogger(__name__)
 

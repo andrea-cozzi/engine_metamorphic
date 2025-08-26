@@ -7,9 +7,9 @@ import lief as lf
 
 
 from component.ass_diss import create_disassembler, disassemble_bytes
-from engine_meta.model.basic_block import BasicBlock
-from engine_meta.model.basic_instruction import BasicInstruction
-from engine_meta.model.ordered_uuidset import OrderedUUIDSet
+from metamorphic_engine.model.basic_block import BasicBlock
+from metamorphic_engine.model.basic_instruction import BasicInstruction
+from metamorphic_engine.model.ordered_uuidset import OrderedUUIDSet
 from model.file_model import FileModelBinary
 from shared.common_def import is_terminator
 from shared.constants import CAPSTONE_TO_KEYSTONE_MAP, INVERT_MAP, TERMINATOR_TYPE
