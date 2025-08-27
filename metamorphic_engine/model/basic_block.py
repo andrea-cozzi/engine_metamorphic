@@ -190,13 +190,12 @@ class BasicBlock:
     # === Nuova funzione per ottenere codice assembly come stringa ===
     def to_asm(self) -> str:
         def get_lines_generator() -> Generator[str, None, None]:
-            yield f"{self.label}:"
-            
+            yield f"{hex(self.start_address)}:"
             for instr in self.instructions:
                 if SAVE_ASM_SHOW_ADDRESS:
-                    line = f"    {instr.address:#x}:\t{instr.mnemonic} {instr.op_str}"
+                    line = f"{instr.address:#x}:\t{instr.mnemonic} {instr.op_str}"
                 else:
-                    line = f"    {instr.mnemonic}\t{instr.op_str}"
+                    line = f"{instr.mnemonic}\t{instr.op_str}"
                 yield line
                 
         return "\n".join(get_lines_generator())

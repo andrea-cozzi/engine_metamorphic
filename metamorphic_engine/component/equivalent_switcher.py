@@ -206,11 +206,11 @@ class EquivalentSwitcher:
         try:
             allowed_registers: Set[str] = ALLOWED_REGISTER[64] if mode_ks == 64 else ALLOWED_REGISTER[32]
 
-            if not set(instruction.regs_read_list).intersection(allowed_registers):
+            if not set(instruction.regs_read_list()).intersection(allowed_registers):
                 logger.info(f"Instruction {instruction.uuid} does not have compatible register read")
                 return None
 
-            if not set(instruction.regs_write_list).intersection(allowed_registers):
+            if not set(instruction.regs_write_list()).intersection(allowed_registers):
                 logger.info(f"Instruction {instruction.uuid} does not have compatible register write")
                 return None
 

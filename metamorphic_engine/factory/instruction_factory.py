@@ -84,7 +84,7 @@ class InstructionFactoryStatic:
             raise ValueError(f"Disassemblaggio di '{asm_str}' fallito.")
         
         cp_ins = disassembled_instructions[0]
-        basic_ins = BasicInstruction(instruction=cp_ins, address=cp_ins.address)
+        basic_ins = BasicInstruction(instruction=cp_ins)
         
         return basic_ins
 

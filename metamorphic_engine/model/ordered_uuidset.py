@@ -72,6 +72,12 @@ class OrderedUUIDSet(Generic[T]):
         start = max(0, index - max_distance)
         prev_uuids = self._order[start:index]
         return [self._items[uid] for uid in prev_uuids]
+    
+
+    def clear(self) -> None:
+        """Rimuove tutti gli elementi dal set."""
+        self._order.clear()
+        self._items.clear()
 
     def remove(self, current_item_uuid: str) -> bool:
         """

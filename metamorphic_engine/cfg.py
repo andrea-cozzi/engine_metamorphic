@@ -1,10 +1,10 @@
+from bisect import bisect_right
 import logging
 import traceback
 from typing import Generator, List, Dict, Optional, Set, Tuple
 import capstone as cap
 import keystone as ks
 import lief as lf
-
 
 from component.ass_diss import create_disassembler, disassemble_bytes
 from metamorphic_engine.model.basic_block import BasicBlock
@@ -33,107 +33,97 @@ NON_PERMUTABLE_GROUP = {
 COSTRUIRE UN MECCANISMO CHE SE è UN JUMP/CALL DEVE
 ESSERE INSERITA IN QUELLE CHE NON POSSONO ESSERE EQUIVALENTI
 """
-
 class EngineMetaCFG:
 
     def __init__(self):
-        #int --> indirizzo di star del blocco
         self.blocks: Dict[int, BasicBlock] = {}
-
-        #indirizzo base della sezione
-        self._start_addres_base : Optional[int] = None
-
-
-        #Tutte le istruzioni / blocks del grafo
+        self._start_address_base: Optional[int] = None
         self._all_instructions_unordered: Set[BasicInstruction] = set()
-        self._all_blocks_ordered : OrderedUUIDSet[BasicBlock] = OrderedUUIDSet[BasicBlock]()
-
-
-        #Mappa delle label dei blocchi
+        self._all_blocks_ordered: OrderedUUIDSet[BasicBlock] = OrderedUUIDSet()
         self._map_address_label: Dict[int, str] = {}
-
-        #Utilie per la ricerca
         self._map_address_instruction: Dict[int, BasicInstruction] = {}
         self._map_address_uuid: Dict[int, str] = {}
-        
-        #Set di UUID per le istruzioni che non TROVAre EQUIVALENTI
-        self.no_equ_set : Set[str] = set()
+        self.no_equ_set: Set[str] = set()
         self.no_perm_set: Set[str] = set()
+        self.created: bool = False
+        self._addresses_dirty: bool = True  # indica se bisogna ricalcolare gli indirizzi
 
-        self.created : bool = False
+    # ---------------- FUNZIONI PRIVATE ----------------
 
-
-    #----- FUNZIONI PRIVATE ---------------------
     def _find_terminators(self, instructions: List[cap.CsInsn]) -> Dict[int, TERMINATOR_TYPE]:
-        terminators = {}
-        for _, instr in enumerate(instructions):
-            term_type, _= is_terminator(instr)
-            if term_type is not None:
-                terminators[instr.address] = term_type
-        return terminators
+        return {instr.address: is_terminator(instr)[0] 
+                for instr in instructions if is_terminator(instr)[0] is not None}
 
-
-    #COSTRUISCO TUTTE LE MAPPE NECESSARIE PER VELOCIZZARE LA RICERCA
     def _create_maps(self) -> None:
-        for block in self.blocks.values():   # usa .values() se self.blocks è un dict
-            for ins in block.instructions:   # block.instructions è un OrderedUUIDSet, puoi iterarlo
+        """Popola le mappe interne e i set basandosi sul dizionario self.blocks."""
+        # Pulisce le strutture dati prima di ripopolarle per evitare duplicati
+        self._all_instructions_unordered.clear()
+        self._all_blocks_ordered.clear()
+        self._map_address_instruction.clear()
+        self._map_address_uuid.clear()
+
+        for block in self.blocks.values():
+            self._all_blocks_ordered.add(block)
+            for ins in block.instructions:
                 self._map_address_instruction[ins.address] = ins
                 self._map_address_uuid[ins.address] = ins.uuid
                 self._all_instructions_unordered.add(ins)
-
-            self._all_blocks_ordered.add(block)
-
-
-
-    #COSTRUISCO IL GRUPPO DI ISTRUZIONI CHE NON POSSONO ESSERE PERMUTATE
-    def _create_unpermutable_set(self) -> None:
-        for _, instruction in enumerate(self._all_instructions_unordered):
-            cap_ins : cap.CsInsn = instruction.original_object
-            if cap_ins is None or not hasattr(cap_ins, "groups"):
-                logger.warning(f"Instructiona at {instruction.address} is None or doesnt have groups attr")
-                raise ValueError(f"Instructiona at {instruction.address} is None or doesnt have groups attr")
-
-            groups = getattr(cap_ins, "groups", [])
-            if any(group in groups for group in NON_PERMUTABLE_GROUP):
-                self.no_perm_set.add(instruction.uuid)
-                instruction.is_permutable = False
-
-
-    #COSTRUISCO IL GRUPPO DI ISTRUZIONI CHE NON POSSO ASSCOARLE UNA EQUIVALENTE
-    def _create_unequivalent_set(self) -> None: 
-        for _, instruction in enumerate(self._all_instructions_unordered):
-            cap_ins: cap.CsInsn = instruction.original_object
-
-            if cap_ins is None or not hasattr(cap_ins, "groups"):
-                logger.warning(f"Instruction at {instruction.address} is None or doesn't have groups attr")
+            
+    def _create_instruction_sets(self) -> None:
+        """Crea sia no_perm_set che no_equ_set in un unico passaggio."""
+        for instruction in self._all_instructions_unordered:
+            cap_ins = instruction.original_object
+            if not cap_ins or not hasattr(cap_ins, "groups"):
+                logger.warning(f"Instruction at {instruction.address} missing groups attribute")
                 continue
 
             groups = getattr(cap_ins, "groups", [])
-
-            if any(group in groups for group in NON_PERMUTABLE_GROUP) or instruction.uuid  in self.no_perm_set:
+            if any(g in groups for g in NON_PERMUTABLE_GROUP) or instruction.uuid in self.no_perm_set:
+                self.no_perm_set.add(instruction.uuid)
                 self.no_equ_set.add(instruction.uuid)
+                instruction.is_permutable = False
                 instruction.is_equivalent = False
 
-
-    #COSTRUISCO IL SINGOLO BLOCCO 
     def _add_block(self, block: BasicBlock) -> Optional[str]:
         if block.start_address not in self.blocks:
             self.blocks[block.start_address] = block
             self._map_address_label[block.start_address] = LABEL_BLOCK.format(block.start_address)
             return block.uuid
-        else:
-            logger.warning(f"Block at {hex(block.start_address)} already exists. Skipping.")
+        logger.warning(f"Block at {hex(block.start_address)} already exists. Skipping.")
+        return None
 
+    def _get_operand_imm(self, op) -> Optional[int]:
+        if hasattr(op, "type") and hasattr(op, "imm"):
+            if op.type == cap.x86.X86_OP_IMM:
+                return op.imm
+        if isinstance(op, dict):
+            return op.get("imm")
+        return None
 
+    def _get_next_block(self, addr: int) -> Optional[BasicBlock]:
+        sorted_starts = sorted(self.blocks.keys())
+        idx = bisect_right(sorted_starts, addr)
+        if idx < len(sorted_starts):
+            return self.blocks[sorted_starts[idx]]
+        return None
 
-    # ----- API DELLA CLASSE -----------------------
+    def _get_block_by_address(self, addr: int) -> Optional[BasicBlock]:
+        return self.blocks.get(addr)
+
+    def _get_near_blocks(self, current_block_uuid: str, max_distance: int = 5) -> List[BasicBlock]:
+        if not current_block_uuid:
+            raise ValueError("A block's uuid is None")
+        max_distance = max_distance if max_distance > 0 else 5
+        return self._all_blocks_ordered.get_next_from_items(current_block_uuid, max_distance)
+
+    # ---------------- CREAZIONE GRAFO ----------------
+
     def create_graph(self, file: FileModelBinary, section: str = ".text") -> None:
-        try:
-            if self.created:
-                logger.info("Graph already created. No need to recreate")
-                return
+        if self.created:
+            logger.info("Graph already created. No need to recreate")
+            return
 
-            # --- inizializza disassembler ---
+        try:
             disassembler = create_disassembler(
                 file_type=file.type,
                 machine_identifier=file.get_machine_type(),
@@ -143,20 +133,16 @@ class EngineMetaCFG:
                 logger.error("Disassembler is None")
                 return
 
-            # --- ottieni sezione di codice ---
             section_binary = file.binary.get_section(section)
             if not section_binary:
                 raise ValueError(f"Section {section} not found")
 
             section_address = file.get_base_address() + section_binary.virtual_address
-            if self._start_addres_base is None:
-                self._start_addres_base = section_address
+            if self._start_address_base is None:
+                self._start_address_base = section_address
 
-            section_code = bytes(section_binary.content)
-
-            # --- disassemblaggio istruzioni ---
-            instructions: List[cap.CsInsn] = disassemble_bytes(
-                codes=section_code,
+            instructions = disassemble_bytes(
+                codes=bytes(section_binary.content),
                 start_address=section_address,
                 dis=disassembler
             )
@@ -164,179 +150,138 @@ class EngineMetaCFG:
                 raise ValueError("Cannot disassemble the instructions")
             logger.info(f"Found {len(instructions)} instructions")
 
-            # --- crea blocchi e aggiungi istruzioni ---
             block: Optional[BasicBlock] = None
-
             for instr in instructions:
                 term_type, is_conditional = is_terminator(instr)
 
-                # Se non esiste blocco corrente, creane uno nuovo
                 if block is None:
                     block = BasicBlock(instr.address)
 
-                # Aggiungi istruzione al blocco
-                unique_ud, instruction_created = block.add_instruction(instr)
-                if unique_ud is None or instruction_created is None:
+                unique_uuid, instruction_created = block.add_instruction(instr)
+                if unique_uuid is None or instruction_created is None:
                     raise ValueError(f"{instr.address} cannot generate UUID or instruction")
-                self._all_instructions_unordered.add(instruction_created)
+                # Non serve aggiungere a self._all_instructions_unordered qui, verrà fatto da _create_maps
 
-                # Se istruzione è terminatore, chiudi il blocco
                 if term_type is not None:
                     block.set_terminator(instr, term_type, is_conditional, uuid=instruction_created.uuid)
-                    block_uuid = self._add_block(block)
-                    if block_uuid is None:
-                        raise ValueError(f"{block.start_address} UUID is None")
-                    self._all_blocks_ordered.add(block)
+                    self._add_block(block)
                     block = None
+            
+            # Se l'ultimo blocco non ha un terminatore esplicito (es. finisce il .text)
+            if block is not None:
+                self._add_block(block)
 
-            # --- crea mappature e set utili ---
             self._create_maps()
-            self._create_unequivalent_set()
-            self._create_unpermutable_set()
-
-            # --- collega blocchi successori ---
+            self._create_instruction_sets()
             self._link_successors()
 
             self.created = True
+            self._addresses_dirty = True
 
         except Exception:
             logger.error(traceback.format_exc())
             self.created = False
 
-    
-
-
-    def _get_operand_imm(self, op) -> Optional[int]:
-        """
-        Estrae l'indirizzo immediato da un operando.
-        Supporta sia oggetti Capstone che dict serializzati.
-        """
-        # Caso Capstone (X86)
-        if hasattr(op, "type") and hasattr(op, "imm"):
-            if op.type == cap.x86.X86_OP_IMM:
-                return op.imm
-            return None
-        # Caso dict serializzato
-        if isinstance(op, dict):
-            return op.get("imm")
-        return None
-
+    # ---------------- SUCCESSORI ----------------
 
     def _link_successors(self, max_neigh: int = 5) -> None:
-        """
-        Associa a ogni blocco i suoi successori.
-        max_neigh indica il numero massimo di blocchi "vicini" da considerare.
-        """
         for block in self._all_blocks_ordered:
             instr = block.terminator
             term_type = block.terminator_type
             is_conditional = getattr(block, "is_conditional", False)
 
             successors: List[Tuple[str, int]] = []
-            near_blocks: List["BasicBlock"] = self._get_near_blocks(block.uuid, max_neigh)
-
-            if term_type == TERMINATOR_TYPE.JUMP:
+            
+            # Se non c'è terminatore, il successore è il blocco successivo
+            if term_type is None:
+                next_block = self._get_next_block(block.start_address)
+                if next_block:
+                    successors.append((next_block.uuid, next_block.start_address))
+            
+            elif term_type == TERMINATOR_TYPE.JUMP:
+                target_addr = self._get_operand_imm(instr.operands[0]) if instr.operands else None
+                target_block = self._get_block_by_address(target_addr) if target_addr else None
+                if target_block:
+                    successors.append((target_block.uuid, target_block.start_address))
+                # Se il salto è condizionale, aggiungi anche il blocco successivo (fall-through)
                 if is_conditional:
-                    # Jump condizionale: target + fall-through
-                    for b in near_blocks:
-                        successors.append((b.uuid, b.start_address))
-                else:
-                    # Jump incondizionale: solo il target immediato
-                    target_addr = None
-                    if instr.operands:
-                        target_addr = self._get_operand_imm(instr.operands[0])
-
-                    if target_addr is not None:
-                        for b in near_blocks:
-                            if b.start_address == target_addr:
-                                successors.append((b.uuid, b.start_address))
+                    next_block = self._get_next_block(block.start_address)
+                    if next_block:
+                        successors.append((next_block.uuid, next_block.start_address))
+            
             elif term_type == TERMINATOR_TYPE.CALL:
-                # Call: il successore naturale è il blocco subito dopo
-                for b in near_blocks:
-                    if b.start_address > block.end_address:
-                        successors.append((b.uuid, b.start_address))
-                        break
-            elif term_type in (
-                TERMINATOR_TYPE.RETURN,
-                TERMINATOR_TYPE.IRET,
-                TERMINATOR_TYPE.INT,
-                TERMINATOR_TYPE.SYSCALL,
-            ):
-                # Terminatori senza successori diretti
-                successors = []
-            else:
-                # Fallback: considera i blocchi vicini
-                for b in near_blocks:
-                    successors.append((b.uuid, b.start_address))
+                # Il successore di una CALL è il blocco immediatamente successivo
+                next_block = self._get_next_block(block.start_address)
+                if next_block:
+                    successors.append((next_block.uuid, next_block.start_address))
 
-            # Aggiungi i successori al blocco
+            # Per RET, IRET, INT, SYSCALL non ci sono successori calcolabili staticamente
+            elif term_type in (TERMINATOR_TYPE.RETURN, TERMINATOR_TYPE.IRET,
+                               TERMINATOR_TYPE.INT, TERMINATOR_TYPE.SYSCALL):
+                successors = []
+
             block._add_successor(successors)
 
+    # ---------------- INDIRIZZI E ISTRUZIONI ----------------
 
-
-    def _get_next_block(self, addr: int) -> Optional[BasicBlock]:
-        """
-        Restituisce il blocco con l'indirizzo più piccolo maggiore di addr.
-        """
+    def ricalculate_all_addresses(self) -> None:
+        if not self._addresses_dirty:
+            return
+        base_address = self._start_address_base
         for block in self._all_blocks_ordered:
-            if block.start_address > addr:
-                return block
-        return None
+            base_address = block.ricalcolate_addresses(base_address=base_address, return_end_address=True)
+        self._addresses_dirty = False
 
-    def _get_block_by_address(self, addr: int) -> Optional[BasicBlock]:
-        """
-        Restituisce il blocco che inizia all'indirizzo addr.
-        """
+    def get_all_instruction(self) -> OrderedUUIDSet[BasicInstruction]:
+        self.ricalculate_all_addresses()
+        instruction_uuidset: OrderedUUIDSet[BasicInstruction] = OrderedUUIDSet()
         for block in self._all_blocks_ordered:
-            if block.start_address == addr:
-                return block
-        return None
+            for ins in block.instructions: # Corretto l'iteratore
+                instruction_uuidset.add(ins)
+        return instruction_uuidset
 
+    # ---------------- UTILITIES ----------------
 
-                    
-    """
-    def get_block_start(self, address: int) -> Optional[int]:
-        sorted_starts = sorted(self.blocks.keys())  # meglio se memorizzato già ordinato
-        idx = bisect.bisect_right(sorted_starts, address) - 1
-        if idx >= 0:
-            return sorted_starts[idx]
-        return None
-    """
+    def clone(self) -> "EngineMetaCFG":
+        """
+        Crea e restituisce una copia profonda (un nuovo oggetto) dell'intero CFG.
+        Tutti i blocchi e le istruzioni vengono clonati a loro volta, e le
+        mappe interne vengono rigenerate per puntare ai nuovi oggetti.
+        """
+        # 1. Crea una nuova istanza
+        new_cfg = EngineMetaCFG()
 
-    def _get_near_blocks(self, cuurent_block_uuid: str, max_distance: int = 5) -> List[Tuple[str, int]]:
-        if cuurent_block_uuid is None or len(cuurent_block_uuid) <=0:
-            raise ValueError("A block's uuid is None")
-        
-        max_distance = max_distance if max_distance > 0 else 5
+        # 2. Copia gli attributi semplici o che non dipendono dagli oggetti clonati
+        new_cfg._start_address_base = self._start_address_base
+        new_cfg.no_equ_set = self.no_equ_set.copy()
+        new_cfg.no_perm_set = self.no_perm_set.copy()
+        new_cfg.created = self.created
+        new_cfg._addresses_dirty = self._addresses_dirty
+        new_cfg._map_address_label = self._map_address_label.copy()
 
-        return self._all_blocks_ordered.get_next_from_items(cuurent_block_uuid, max_distance)
+        # 3. Esegui una copia profonda dei blocchi. Questo è il passo cruciale.
+        # Ogni blocco viene clonato, che a sua volta clona le sue istruzioni.
+        for start_address, block in self.blocks.items():
+            new_cfg.blocks[start_address] = block.clone()
 
+        # 4. Rigenera tutte le mappe interne e i set basati sui blocchi clonati.
+        # Questo assicura che tutti i riferimenti interni puntino ai nuovi oggetti
+        # (nuovi blocchi e nuove istruzioni) invece che a quelli vecchi.
+        new_cfg._create_maps()
 
+        # Nota: le informazioni sui successori sono contenute all'interno di ogni
+        # BasicBlock e vengono già copiate durante il block.clone().
 
-     
-
-
-    # FUNXIONE CHE MI RICALCOLA TUTTI GLI ADDRESS DELLE ISTRUZIONI
-    def ricalculate_all_addresses(self)-> None:
-        base_address: int = self._start_addres_base
-        for _, block in enumerate(self._all_blocks_ordered):
-           base_address= block.ricalcolate_addresses(base_address=base_address, return_end_address=True)
-
-        
-   
-
-
-
-
-    # --- FUNZIONI UTILI -----
+        return new_cfg
 
     def dump(self) -> List[dict]:
         return [blk.to_dict() for blk in sorted(self.blocks.values(), key=lambda x: x.start_address)]
-    
-    def to_asm(self) -> Generator[str, None, None]:
-        for _, block in enumerate(self._all_blocks_ordered):
-            yield block.to_asm() + "\n"
-        
+
+    def to_asm(self) -> str:
+        """Restituisce una stringa contenente l'intero programma assembly del CFG."""
+        # Ordina i blocchi per indirizzo per garantire un output coerente
+        ordered_blocks = sorted(self.blocks.values(), key=lambda b: b.start_address)
+        return "\n\n".join(block.to_asm() for block in ordered_blocks)
 
 """
 FLUSSO DI FUNZIONI

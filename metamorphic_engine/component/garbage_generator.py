@@ -18,7 +18,7 @@ from constant_var import (
 from metamorphic_engine.model.basic_instruction import BasicInstruction
 from metamorphic_engine.model.ordered_uuidset import OrderedUUIDSet
 
-logger = logging.getLogger("garbage_generator")
+logger = logging.getLogger(__name__)
 
 
 class GarbageGenerator:
@@ -266,67 +266,60 @@ class GarbageGenerator:
     # Trasformazioni
     # -----------------------
     @staticmethod
-    def _add_dead_code(block: BasicBlock, arch_ks: int, mode_ks: int, arch_cs: int, mode_cs: int) -> None:
-        if not block or len(block.instructions) == 0:
-            return
+    def _add_dead_code(block: BasicBlock, arch_ks: int, mode_ks: int, arch_cs: int, mode_cs: int) -> bool:
+        if not block or len(block.instructions) < 2:
+            return False
 
         allow_register, dead_code_constants, _, _, _ = GarbageGenerator._get_arch_constants(mode_ks)
-
         all_used_regs = set()
         for instruction in block.instructions:
-            # Questi attributi si presume siano liste/insiemi di stringhe
-            all_used_regs.update(getattr(instruction, "regs_read_list", []) or [])
-            all_used_regs.update(getattr(instruction, "regs_write_list", []) or [])
+            # CORREZIONE: Chiama i metodi `regs_read_list` e `regs_write_list` con `()`
+            # e gestisce correttamente il caso in cui non esistano o non siano chiamabili.
+            for attr_name in ("regs_read_list", "regs_write_list"):
+                attr = getattr(instruction, attr_name, None)
+                if callable(attr):
+                    regs = attr()
+                    if regs:
+                        all_used_regs.update(regs)
 
-        can_add_dead_code, available_regs = GarbageGenerator._can_add(all_used_regs, allow_register)
-        if not (can_add_dead_code and available_regs):
+        can_add, available_regs = GarbageGenerator._can_add(all_used_regs, allow_register)
+        if not (can_add and available_regs):
             logger.debug("No available registers for dead code addition.")
-            return
+            return False
 
-        # Evita di esagerare con gli inserimenti
         max_insertions = max(1, len(block.instructions) // 2)
         num_insertions = random.randint(1, max_insertions)
         logger.debug("Adding %d dead code insertion(s).", num_insertions)
 
-        # Prepara le posizioni di inserimento (escludi l’ultima se è il terminatore)
-        safe_instrs = list(block.instructions)
-        if len(safe_instrs) > 1:
-            safe_instrs = safe_instrs[:-1]  # evita di spezzare il terminatore
+        # Inserisci dopo istruzioni che non siano il terminatore
+        safe_insertion_points = [instr.uuid for instr in list(block.instructions)[:-1]]
+        if not safe_insertion_points:
+            return False
 
-        if not safe_instrs:
-            return
-
-        instructions_to_add: List[Tuple[str, BasicInstruction]] = []
-
+        instructions_added = 0
         for _ in range(num_insertions):
-            selected_reg = random.choice(list(available_regs))
-            inst_tpl = random.choice(dead_code_constants)
-
-            # Crea 1 o 2 istruzioni a seconda del template
-            asm_list = [inst_tpl[0].format(reg=selected_reg)]
-            if inst_tpl[1]:
-                asm_list.append(inst_tpl[1].format(reg=selected_reg))
-
             try:
-                new_instructions = GarbageGenerator._assemble(
-                    asm=asm_list, arch_ks=arch_ks, mode_ks=mode_ks, arch_cs=arch_cs, mode_cs=mode_cs
-                )
-                # Scegli un punto di inserimento casuale (dopo)
-                target_instruction = random.choice(safe_instrs)
+                selected_reg = random.choice(list(available_regs))
+                inst_tpl = random.choice(dead_code_constants)
+                asm_list = [inst_tpl[0].format(reg=selected_reg)]
+                if inst_tpl[1]:
+                    asm_list.append(inst_tpl[1].format(reg=selected_reg))
+
+                new_instructions = GarbageGenerator._assemble(asm_list, arch_ks, mode_ks, arch_cs, mode_cs)
+                
+                # Scegli un punto di inserimento casuale
+                after_uuid = random.choice(safe_insertion_points)
+                
+                # Inserisci le nuove istruzioni in catena
                 for ins in new_instructions:
-                    instructions_to_add.append((target_instruction.uuid, ins))
-                    target_instruction = ins
+                    block.instructions.add_after(after_uuid=after_uuid, item=ins)
+                    after_uuid = ins.uuid # La prossima istruzione verrà inserita dopo questa
+                    instructions_added += 1
+
             except Exception as e:
-                logger.error(traceback.format_exc())
-                logger.error("Failed to create dead code instruction: %s", e)
-
-        # Applica gli inserimenti
-        for uuid_after, ins in instructions_to_add:
-            block.instructions.add_after(after_uuid=uuid_after, item=ins)
-
-        # Ricalcola indirizzi solo una volta alla fine
-        if instructions_to_add:
-            block.ricalcolate_addresses()
+                logger.error("Failed to create dead code instruction: %s\n%s", e, traceback.format_exc())
+        
+        return instructions_added > 0
 
     @staticmethod
     def _add_nop_instruction(block: BasicBlock, arch_ks: int, mode_ks: int, arch_cs: int, mode_cs: int) -> None:
@@ -430,7 +423,8 @@ class GarbageGenerator:
         """Esegue le trasformazioni con le probabilità configurate."""
         try:
             if random.random() < PRO_ADD_DEAD_CODE:
-                GarbageGenerator._add_dead_code(block, arch_ks, mode_ks, arch_cs, mode_cs)
+                if not GarbageGenerator._add_dead_code(block, arch_ks, mode_ks, arch_cs, mode_cs):
+                    logger.info(f"for block: {block.uuid} was not added any dead_code")
             if random.random() < PRO_ADD_NOP_INST:
                 GarbageGenerator._add_nop_instruction(block, arch_ks, mode_ks, arch_cs, mode_cs)
             if random.random() < PRO_ADD_OPAQUE_CODE:

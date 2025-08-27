@@ -39,6 +39,8 @@ FILENAME_JSON_REPORT = os.environ.get("FILENAME_JSON_REPORT", "mutation_report.j
 REPORT_JSON_PATH = os.environ.get("REPORT_JSON_PATH", "./report/")
 
 SAVE_CFG_JSON = get_boolean_env_var("SAVE_CFG_JSON", False)
+SAVE_MUTATION_REPORT = get_boolean_env_var("SAVE_MUTATION_REPORT", False)
+ADJ_AUTO_PROB = get_boolean_env_var("ADJ_AUTO_PROB", False)
 
 SAVE_ASM_DECODED = get_boolean_env_var("SAVE_ASM_DECODED", True)
 SAVE_ASM_SHOW_ADDRESS = get_boolean_env_var("SAVE_ASM_SHOW_ADDRESS", False)
