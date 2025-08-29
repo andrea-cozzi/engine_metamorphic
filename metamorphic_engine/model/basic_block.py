@@ -76,6 +76,7 @@ class BasicBlock:
         else:
             raise ValueError("set_terminator: param configuration is not valid")
 
+        instruction_form.is_terminator = True
         self.terminator = instruction_form
 
     def get_instruction_addredd(self, address: int) -> Optional["BasicInstruction"]:
@@ -158,6 +159,7 @@ class BasicBlock:
         for uuid, addr in uuids:
             self.successors[uuid] = addr
 
+    #TODO: NON SERVE PIù
     def clone(self) -> "BasicBlock":
         """
         Crea e restituisce una copia profonda (un nuovo oggetto) di questo blocco.
@@ -193,9 +195,15 @@ class BasicBlock:
             yield f"{hex(self.start_address)}:"
             for instr in self.instructions:
                 if SAVE_ASM_SHOW_ADDRESS:
-                    line = f"{instr.address:#x}:\t{instr.mnemonic} {instr.op_str}"
+                    if instr.is_terminator and instr.terminator_new_address is not None:
+                        line = f"{instr.address:#x}:\t{instr.mnemonic} {hex(instr.terminator_new_address)}"
+                    else:
+                        line = f"{instr.address:#x}:\t{instr.mnemonic} {instr.op_str}"
                 else:
-                    line = f"{instr.mnemonic}\t{instr.op_str}"
+                    if instr.is_terminator:
+                        line = f"{instr.mnemonic}\t{hex(instr.terminator_new_address)}"
+                    else:
+                        line = f"{instr.mnemonic}\t{instr.op_str}"
                 yield line
                 
         return "\n".join(get_lines_generator())

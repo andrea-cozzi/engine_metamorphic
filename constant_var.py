@@ -48,6 +48,7 @@ SAVE_ASM_CODE_MULTILINE = get_boolean_env_var("SAVE_ASM_CODE_MULTILINE", False)
 
 ASSEMBLY_OUTPUT_PATH = os.environ.get("ASSEMBLY_OUTPUT_PATH", "./assembly_output/")
 PATH_EXE = os.environ.get("PATH_EXE", "")
+PATH_OUTPUT_EXE = os.environ.get("PATH_OUTPUT_EXE", "./exe/")
 
 PRO_ADD_DEAD_CODE = get_float_env_var("PRO_ADD_DEAD_CODE", 0.4)
 PRO_ADD_NOP_INST = get_float_env_var("PRO_ADD_NOP_INST", 0.2)

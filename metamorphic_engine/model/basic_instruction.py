@@ -35,6 +35,8 @@ class BasicInstruction:
         # Flag per analisi successive (valori di default)
         self.is_permutable: bool = True
         self.is_equivalent: bool = True
+        self.is_terminator: bool = False
+        self.terminator_new_address: Optional[int] = None
         
         # Calcola l'UUID
         self.uuid = self.get_uuid()

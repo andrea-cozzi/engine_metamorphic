@@ -16,7 +16,6 @@ from shared.constants import CAPSTONE_TO_KEYSTONE_MAP, INVERT_MAP, TERMINATOR_TY
 
 logger = logging.getLogger(__name__)
 
-LABEL_BLOCK = "label_{:#x}"
 
 NON_PERMUTABLE_GROUP = {
         cap.CS_GRP_JUMP,
@@ -64,11 +63,12 @@ class EngineMetaCFG:
 
         for block in self.blocks.values():
             self._all_blocks_ordered.add(block)
-            for ins in block.instructions:
+            for ins in list(block.instructions):
                 self._map_address_instruction[ins.address] = ins
                 self._map_address_uuid[ins.address] = ins.uuid
                 self._all_instructions_unordered.add(ins)
-            
+                
+                            
     def _create_instruction_sets(self) -> None:
         """Crea sia no_perm_set che no_equ_set in un unico passaggio."""
         for instruction in self._all_instructions_unordered:
@@ -84,11 +84,12 @@ class EngineMetaCFG:
                 instruction.is_permutable = False
                 instruction.is_equivalent = False
 
+   
     def _add_block(self, block: BasicBlock) -> Optional[str]:
         if block.start_address not in self.blocks:
             self.blocks[block.start_address] = block
-            self._map_address_label[block.start_address] = LABEL_BLOCK.format(block.start_address)
             return block.uuid
+        
         logger.warning(f"Block at {hex(block.start_address)} already exists. Skipping.")
         return None
 
@@ -225,8 +226,6 @@ class EngineMetaCFG:
     # ---------------- INDIRIZZI E ISTRUZIONI ----------------
 
     def ricalculate_all_addresses(self) -> None:
-        if not self._addresses_dirty:
-            return
         base_address = self._start_address_base
         for block in self._all_blocks_ordered:
             base_address = block.ricalcolate_addresses(base_address=base_address, return_end_address=True)
@@ -235,44 +234,56 @@ class EngineMetaCFG:
     def get_all_instruction(self) -> OrderedUUIDSet[BasicInstruction]:
         self.ricalculate_all_addresses()
         instruction_uuidset: OrderedUUIDSet[BasicInstruction] = OrderedUUIDSet()
-        for block in self._all_blocks_ordered:
-            for ins in block.instructions: # Corretto l'iteratore
+        for block in list(self._all_blocks_ordered):
+            for ins in list(block.instructions): 
                 instruction_uuidset.add(ins)
         return instruction_uuidset
 
+
+    #TODO: FUNZIONE PER AGGIORNARE GLI INDIRIZZI DEI TERMINATOR
+    def resolve_terminator_addresses(self) -> Set[int]:
+        """
+        Tenta di aggiornare gli indirizzi dei terminatori JMP/CALL.
+        Restituisce un set contenente tutti gli indirizzi di destinazione originali
+        che non è stato possibile risolvere.
+        """
+        all_instructions_ordered = self.get_all_instruction()
+        map_uuid_to_instruction = {ins.uuid: ins for ins in all_instructions_ordered}
+        
+        # 1. Crea un set vuoto per raccogliere gli indirizzi
+        unresolved_addresses: Set[int] = set()
+
+        for term in (ins for ins in all_instructions_ordered if ins.is_terminator):
+            if cap.CS_GRP_JUMP in term.groups or cap.CS_GRP_CALL in term.groups:
+                if not term.operands:
+                    continue
+
+                original_target_addr = self._get_operand_imm(term.operands[0])
+                if original_target_addr is None:
+                    continue
+
+                target_uuid = self._map_address_uuid.get(original_target_addr)
+                
+                if target_uuid is None:
+                    # 2. Aggiungi l'indirizzo non risolto al set
+                    unresolved_addresses.add(original_target_addr)
+                    continue # Passa all'istruzione successiva
+
+                target_instr = map_uuid_to_instruction.get(target_uuid)
+                
+                if target_instr is None or target_instr.address is None:
+                    unresolved_addresses.add(original_target_addr)
+                    logger.error(f"ERRORE CRITICO: Trovato UUID per {hex(original_target_addr)} ma l'oggetto istruzione non esiste più!")
+                    continue
+
+                term.terminator_new_address = target_instr.address
+
+        # 3. Restituisci il set completo alla fine
+        return unresolved_addresses
+
+                        
+
     # ---------------- UTILITIES ----------------
-
-    def clone(self) -> "EngineMetaCFG":
-        """
-        Crea e restituisce una copia profonda (un nuovo oggetto) dell'intero CFG.
-        Tutti i blocchi e le istruzioni vengono clonati a loro volta, e le
-        mappe interne vengono rigenerate per puntare ai nuovi oggetti.
-        """
-        # 1. Crea una nuova istanza
-        new_cfg = EngineMetaCFG()
-
-        # 2. Copia gli attributi semplici o che non dipendono dagli oggetti clonati
-        new_cfg._start_address_base = self._start_address_base
-        new_cfg.no_equ_set = self.no_equ_set.copy()
-        new_cfg.no_perm_set = self.no_perm_set.copy()
-        new_cfg.created = self.created
-        new_cfg._addresses_dirty = self._addresses_dirty
-        new_cfg._map_address_label = self._map_address_label.copy()
-
-        # 3. Esegui una copia profonda dei blocchi. Questo è il passo cruciale.
-        # Ogni blocco viene clonato, che a sua volta clona le sue istruzioni.
-        for start_address, block in self.blocks.items():
-            new_cfg.blocks[start_address] = block.clone()
-
-        # 4. Rigenera tutte le mappe interne e i set basati sui blocchi clonati.
-        # Questo assicura che tutti i riferimenti interni puntino ai nuovi oggetti
-        # (nuovi blocchi e nuove istruzioni) invece che a quelli vecchi.
-        new_cfg._create_maps()
-
-        # Nota: le informazioni sui successori sono contenute all'interno di ogni
-        # BasicBlock e vengono già copiate durante il block.clone().
-
-        return new_cfg
 
     def dump(self) -> List[dict]:
         return [blk.to_dict() for blk in sorted(self.blocks.values(), key=lambda x: x.start_address)]
@@ -282,41 +293,3 @@ class EngineMetaCFG:
         # Ordina i blocchi per indirizzo per garantire un output coerente
         ordered_blocks = sorted(self.blocks.values(), key=lambda b: b.start_address)
         return "\n\n".join(block.to_asm() for block in ordered_blocks)
-
-"""
-FLUSSO DI FUNZIONI
-
-- genrate_mutation() 
-
-    -create graph -->
-        => 
-        => Individuo e creo set per i TERMINATORI ==> set di indirizzi
-        => creo il grafo e suddivdo il codice a blocchi
-        => creo il dizionario: Indirizzo_originale-UUID --> Mappa: Indirizzo_orginale - UUID
-        => creo set per gli indirizzi puntati da JUMP / CALL --> UUID bloccati per le equivalenze
-        => creo mappa per le label: label_{uuid}
-
-        => PERMUTAZIONI
-            - capire quanto due istruzioni sono indipendenti
-              e se possono essere inveritie
-            - invertimento di blocchi
-        
-        => INSERIMENTO DI GARBAGE CODE --> quando la inserisco --> devo trovare
-            la size con un assemlber 
-
-        => RISOLUZIONE DI OPERAZIONI DI JUMP / CALL CHE NON HANNO UNA LABEL
-         --> mi ricavo l'indirizzo originale, trovo lo UUID della istruzione, 
-         --> e da li vado a calcolare il suo indirizzo sommando tutte le size
-
-
-        => EQUIVALENZE tra istuzioni
-
-
-
-
-
-TODO
-    - separare le 3 classi del grafo
-    
-
-"""

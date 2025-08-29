@@ -200,7 +200,7 @@ class FileUtils:
         output_dir = ASSEMBLY_PATH
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 🔹 Forza estensione corretta
+        # Forza estensione corretta
         original_base_name = Path(FileUtils._ensure_extension(original_base_name, ".asm")).stem
         original_path = output_dir / f"{original_base_name}"
 
